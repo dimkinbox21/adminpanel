@@ -6,18 +6,20 @@
 	Функции: Fly, Noclip, Godmode (локальный), бесконечная стамина,
 	невидимость, ESP (метки цветом команды - как в списке игроков,
 	отдельная метка Caretaker и указатели 360 на тех, кто вне экрана),
-	список игроков, автоблок, предупреждение о киллере.
+	авто-аим на киллера, панель "сзади", список игроков, автоблок,
+	предупреждение о киллере.
 
 	Клавиши по умолчанию: RightCtrl - меню, F - Fly, N - Noclip, G - Godmode,
 	H - бесконечная стамина, J - невидимость, E - ESP, T - список игроков,
-	B - автоблок, K - предупреждение о киллере.
+	B - автоблок, K - предупреждение о киллере, X - авто-аим,
+	C - панель "сзади".
 	Все бинды переназначаются в меню: жми кнопку с названием клавиши справа
 	от тумблера и нажми новую клавишу (Escape - отмена).
 	В полёте: WASD - движение, Space - вверх, LeftShift - вниз.
 
-	Окно широкое, с вкладками слева: Читы, ESP, Игроки, Автоблок, Опасность,
-	Конфиг. Каждая вкладка - свой скролл, поэтому позиция в одной не
-	сбивается при переходе в другую.
+	Окно широкое, с вкладками слева: Читы, ESP, Аим, Игроки, Автоблок,
+	Опасность, Конфиг. Каждая вкладка - свой скролл, поэтому позиция в одной
+	не сбивается при переходе в другую.
 
 	Автоблок сам ставит блок, когда киллер рядом начинает атаку. Работает
 	только через executor: нажатие отправляется VirtualInputManager, а этому
@@ -68,6 +70,8 @@ local BINDS = {
 	list = Enum.KeyCode.T,
 	autoblock = Enum.KeyCode.B,
 	warning = Enum.KeyCode.K,
+	aimbot = Enum.KeyCode.X, -- авто-наведение камеры на киллера
+	rear = Enum.KeyCode.C, -- панель "сзади" в правом нижнем углу
 }
 
 local FLY_KEYS = {
@@ -437,6 +441,89 @@ local WARNING = {
 }
 
 --[[
+	АВТО-АИМ НА КИЛЛЕРА (тумблер, по умолчанию X).
+
+	Пока включён, камера каждый кадр доворачивается на ближайшего живого
+	киллера. Не «подкрутка при выстреле», а постоянный захват: в этом плейсе
+	стрелять не из чего, наводка нужна, чтобы не терять киллера из виду в
+	ближнем бою и в погоне.
+
+	Наводка ставится через workspace.CurrentCamera.CFrame в BindToRenderStep
+	с приоритетом Camera+1 - то есть ПОСЛЕ штатной камеры в том же кадре,
+	иначе стандартный скрипт камеры тут же перезаписал бы наш поворот.
+
+	Цель ищется тем же способом, что список и предупреждение
+	(workspace.GameAssets.Teams.Killer), мёртвые киллеры пропускаются.
+	Ограничения - в заметке 13 в конце файла.
+]]
+-- Контейнер авто-аима и панели "сзади". Один локал верхнего уровня
+-- вместо десятка: у файла почти выбран лимит в 200 регистров (см.
+-- do-блок конфига), и отдельные локалы под каждую мелочь переполняют его.
+local X = {}
+
+X.aimbot = {
+	MaxDistance = 250, -- дальше этого не наводимся; 0 = без лимита
+	DistanceStep = 50,
+	DistanceMin = 0,
+	DistanceMax = 2000,
+	--[[
+		Плавность. 1 = мгновенный захват (жёсткий лок). Больше - камера
+		доворачивается за несколько кадров через Lerp, движение мягче, но
+		цель ведётся с небольшим отставанием. Это доля 1/Smoothness за кадр.
+	]]
+	Smoothness = 1,
+	SmoothnessStep = 1,
+	SmoothnessMin = 1,
+	SmoothnessMax = 20,
+	AimHead = true, -- целиться в голову; выкл. - в центр корпуса (стабильнее)
+	VisibleOnly = false, -- наводиться только когда киллер не за стеной
+}
+
+--[[
+	ПАНЕЛЬ «СЗАДИ» (тумблер, по умолчанию C).
+
+	Маленькая панель в правом НИЖНЕМ углу: кто находится за спиной и что с
+	ним происходит. Обзор в игре ограничен полем зрения камеры, а опасность
+	в этом плейсе приходит именно со спины - панель закрывает слепую зону.
+
+	Сектор «сзади» считается по камере: берётся горизонтальный LookVector,
+	и в панель попадают те, кто в пределах X.rear.Angle градусов от направления
+	ПРЯМО ЗА СПИНОЙ (-Look). Для каждого - дистанция, сторона (лево/право/
+	прямо, чтобы понять, куда разворачиваться) и тренд сближения. Цвет строки:
+	красный - приближается, зелёный - отдаляется, серый - держит дистанцию.
+	Киллер помечается значком ⚠ и всегда идёт первым.
+]]
+X.rear = {
+	MaxDistance = 140, -- показывать тех, кто ближе этого; 0 = без лимита
+	DistanceStep = 20,
+	DistanceMin = 20,
+	DistanceMax = 500,
+	--[[
+		Полу-угол заднего сектора в градусах, от направления прямо за спиной.
+		90 - ровно задняя полусфера, больше - захватывает и то, что чуть сбоку,
+		180 - вообще все. Меньше 90 сужает до «строго за спиной».
+	]]
+	Angle = 100,
+	AngleStep = 10,
+	AngleMin = 45,
+	AngleMax = 180,
+	OnlyThreats = false, -- показывать только киллера
+	-- Порог тренда сближения, студов/сек: репликация рывками даёт дрожание,
+	-- ниже порога считаем, что дистанция держится.
+	Epsilon = 1.5,
+	Interval = 0.1, -- пересчёт 10 раз в секунду, как у списка игроков
+	MaxRows = 6, -- лишние сворачиваются в "+N ещё"
+	Width = 244,
+	ValueWidth = 96,
+	RowHeight = 16,
+	HeaderHeight = 20,
+	OffsetX = 12,
+	OffsetY = 12, -- отступ от нижнего края
+	ApproachColor = Color3.fromRGB(235, 80, 80),
+	LeaveColor = Color3.fromRGB(90, 200, 120),
+}
+
+--[[
 	НЕВИДИМОСТЬ.
 
 	Способ из esp.txt (строка 847): проигрывается специальная анимация,
@@ -738,6 +825,17 @@ do
 		autoblockShowHits = HITBOX.ShowHits,
 		staminaNoFatigue = STAMINA.NoFatigue,
 		warningDistance = WARNING.Distance,
+		aimbot = {
+			MaxDistance = X.aimbot.MaxDistance,
+			Smoothness = X.aimbot.Smoothness,
+			AimHead = X.aimbot.AimHead,
+			VisibleOnly = X.aimbot.VisibleOnly,
+		},
+		rear = {
+			MaxDistance = X.rear.MaxDistance,
+			Angle = X.rear.Angle,
+			OnlyThreats = X.rear.OnlyThreats,
+		},
 	}
 
 	-- В файл попадает только то, что правится из меню. FLY.Step/Min/Max и
@@ -769,6 +867,8 @@ do
 		"list",
 		"autoblock",
 		"warning",
+		"aimbot",
+		"rear",
 	}
 	BIND_IDS = BIND_IDS_LOCAL
 
@@ -903,6 +1003,43 @@ do
 		end
 	end
 
+	local function applyAimbotFromConfig(aimbot)
+		if type(aimbot) ~= "table" then
+			return
+		end
+		local maxDistance = aimbot.maxDistance
+		if type(maxDistance) == "number" and maxDistance == maxDistance then
+			X.aimbot.MaxDistance = math.clamp(math.floor(maxDistance), X.aimbot.DistanceMin, X.aimbot.DistanceMax)
+		end
+		local smoothness = aimbot.smoothness
+		if type(smoothness) == "number" and smoothness == smoothness then
+			X.aimbot.Smoothness = math.clamp(math.floor(smoothness), X.aimbot.SmoothnessMin, X.aimbot.SmoothnessMax)
+		end
+		if type(aimbot.aimHead) == "boolean" then
+			X.aimbot.AimHead = aimbot.aimHead
+		end
+		if type(aimbot.visibleOnly) == "boolean" then
+			X.aimbot.VisibleOnly = aimbot.visibleOnly
+		end
+	end
+
+	local function applyRearFromConfig(rear)
+		if type(rear) ~= "table" then
+			return
+		end
+		local maxDistance = rear.maxDistance
+		if type(maxDistance) == "number" and maxDistance == maxDistance then
+			X.rear.MaxDistance = math.clamp(math.floor(maxDistance), X.rear.DistanceMin, X.rear.DistanceMax)
+		end
+		local angle = rear.angle
+		if type(angle) == "number" and angle == angle then
+			X.rear.Angle = math.clamp(math.floor(angle), X.rear.AngleMin, X.rear.AngleMax)
+		end
+		if type(rear.onlyThreats) == "boolean" then
+			X.rear.OnlyThreats = rear.onlyThreats
+		end
+	end
+
 	-- Мутируем таблицы на месте: замыкания кнопок UI держат ссылки на них.
 	local function applyConfigTable(data)
 		applyBindsFromConfig(data.binds)
@@ -912,6 +1049,8 @@ do
 		applyAutoblockFromConfig(data.autoblock)
 		applyStaminaFromConfig(data.stamina)
 		applyWarningFromConfig(data.warning)
+		applyAimbotFromConfig(data.aimbot)
+		applyRearFromConfig(data.rear)
 	end
 
 	--[[
@@ -979,6 +1118,17 @@ do
 			},
 			stamina = { noFatigue = STAMINA.NoFatigue },
 			warning = { distance = WARNING.Distance },
+			aimbot = {
+				maxDistance = X.aimbot.MaxDistance,
+				smoothness = X.aimbot.Smoothness,
+				aimHead = X.aimbot.AimHead,
+				visibleOnly = X.aimbot.VisibleOnly,
+			},
+			rear = {
+				maxDistance = X.rear.MaxDistance,
+				angle = X.rear.Angle,
+				onlyThreats = X.rear.OnlyThreats,
+			},
 		}
 	end
 
@@ -1187,6 +1337,8 @@ local state = {
 	list = false,
 	autoblock = false,
 	warning = true, -- предупреждение о киллере полезно сразу, без включения
+	aimbot = false,
+	rear = false,
 }
 
 local character, humanoid, rootPart
@@ -4102,6 +4254,400 @@ local function applyAutoblock(enabled)
 	refreshAutoblockStatus()
 end
 
+--=========================== АВТО-АИМ ===========================
+
+--[[
+	Постоянный захват камеры на ближайшего киллера. Логика описана у таблицы
+	X.aimbot; здесь - как именно перехватывается камера.
+
+	Всё в do-блоке (лимит 200 локалов на верхнем уровне), наружу торчит только
+	X.applyAimbot для таблицы FEATURES. Сам захват висит на BindToRenderStep, а
+	не на общем RenderStepped: важен ПРИОРИТЕТ. Штатный скрипт камеры считает
+	свой CFrame на приоритете Camera; наш шаг стоит на Camera+1 и переписывает
+	результат в том же кадре. На обычном RenderStepped:Connect порядок
+	относительно камеры не гарантирован, и наводка через раз «сбрасывалась» бы
+	назад к мыши.
+]]
+do
+	-- Ближайший живой киллер к точке origin. Свой аналог nearestKiller из
+	-- баннера: тот сидит в чужом do-блоке и наружу не виден.
+	local function nearestKiller(origin)
+		local bestChar, bestDistance
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other ~= player then
+				local char = other.Character
+				local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
+				if root and teamNameOf(other, char) == KILLER_TEAM then
+					local humanoidOther = char:FindFirstChildOfClass("Humanoid")
+					if not (humanoidOther and humanoidOther.Health <= 0) then
+						local d = (root.Position - origin).Magnitude
+						if not bestDistance or d < bestDistance then
+							bestChar, bestDistance = char, d
+						end
+					end
+				end
+			end
+		end
+		return bestChar, bestDistance
+	end
+
+	-- Часть, в которую целимся. Голова точнее, центр корпуса устойчивее
+	-- (голова дёргается анимацией). HumanoidRootPart - запасной вариант.
+	local function aimPartOf(char)
+		if X.aimbot.AimHead then
+			local head = char:FindFirstChild("Head")
+			if head and head:IsA("BasePart") then
+				return head
+			end
+		end
+		for _, name in ipairs({ "UpperTorso", "Torso", "HumanoidRootPart" }) do
+			local part = char:FindFirstChild(name)
+			if part and part:IsA("BasePart") then
+				return part
+			end
+		end
+		return char:FindFirstChildWhichIsA("BasePart")
+	end
+
+	-- Луч от камеры к цели: если первым встретилась чужая геометрия, а не сам
+	-- киллер, значит он за стеной. Свой персонаж из проверки исключён.
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.IgnoreWater = true
+
+	local function targetVisible(camera, killerChar, targetPart)
+		rayParams.FilterDescendantsInstances = character and { character } or {}
+		local origin = camera.CFrame.Position
+		local delta = targetPart.Position - origin
+		if delta.Magnitude < 0.1 then
+			return true
+		end
+		local hit = workspace:Raycast(origin, delta, rayParams)
+		if not hit then
+			return true
+		end
+		return hit.Instance:IsDescendantOf(killerChar)
+	end
+
+	local function step()
+		if not state.aimbot then
+			return
+		end
+		local camera = getCamera()
+		if not camera then
+			return
+		end
+
+		local camPosition = camera.CFrame.Position
+		local origin = (rootPart and rootPart.Parent) and rootPart.Position or camPosition
+
+		local killerChar, distance = nearestKiller(origin)
+		if not killerChar then
+			return
+		end
+		if X.aimbot.MaxDistance > 0 and distance and distance > X.aimbot.MaxDistance then
+			return
+		end
+
+		local part = aimPartOf(killerChar)
+		if not part then
+			return
+		end
+		if X.aimbot.VisibleOnly and not targetVisible(camera, killerChar, part) then
+			return
+		end
+
+		-- Совпадение точек ломает CFrame.lookAt (NaN), поэтому отдельная проверка.
+		if (part.Position - camPosition).Magnitude < 0.1 then
+			return
+		end
+
+		local goal = CFrame.lookAt(camPosition, part.Position)
+		if X.aimbot.Smoothness <= 1 then
+			camera.CFrame = goal
+		else
+			camera.CFrame = camera.CFrame:Lerp(goal, 1 / X.aimbot.Smoothness)
+		end
+	end
+
+	--[[
+		Наводка живёт целиком в step() и не держит состояния, поэтому применять
+		при переключении тумблера нечего: step() сам проверяет state.aimbot.
+		Когда чит выключен, камера в тот же кадр возвращается под управление
+		штатного скрипта - ничего откатывать не нужно.
+	]]
+	function X.applyAimbot() end
+
+	RunService:BindToRenderStep("AdminAimbot", Enum.RenderPriority.Camera.Value + 1, step)
+end
+
+--=========================== ПАНЕЛЬ СЗАДИ ===========================
+
+--[[
+	Панель в правом нижнем углу: кто за спиной и что с ним происходит. Смысл -
+	у таблицы X.rear. Здесь пул строк (как у списка игроков) и пересчёт сектора.
+
+	Наружу торчат X.applyRear (для FEATURES) и X.updateRear (зовётся из основного
+	цикла по таймеру). Остальное - в do-блоке ради лимита локалов.
+]]
+do
+	local rearGui = new("ScreenGui", {
+		Name = "AdminRearPanel",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = 94, -- ниже списка игроков и баннера, но выше игры
+		Parent = playerGui,
+	})
+
+	local rearFrame = new("Frame", {
+		Name = "Rear",
+		AnchorPoint = Vector2.new(1, 1), -- крепим за правый нижний угол
+		Position = UDim2.new(1, -X.rear.OffsetX, 1, -X.rear.OffsetY),
+		Size = UDim2.fromOffset(X.rear.Width, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = COLORS.Background,
+		BackgroundTransparency = 0.25,
+		BorderSizePixel = 0,
+		Visible = false,
+		Parent = rearGui,
+	})
+	new("UICorner", { CornerRadius = UDim.new(0, 6), Parent = rearFrame })
+	new("UIStroke", { Color = Color3.fromRGB(60, 60, 70), Thickness = 1, Parent = rearFrame })
+	new("UIPadding", {
+		PaddingTop = UDim.new(0, 6),
+		PaddingBottom = UDim.new(0, 6),
+		PaddingLeft = UDim.new(0, 8),
+		PaddingRight = UDim.new(0, 8),
+		Parent = rearFrame,
+	})
+	new("UIListLayout", {
+		Padding = UDim.new(0, 1),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Parent = rearFrame,
+	})
+
+	local titleLabel = new("TextLabel", {
+		Name = "Title",
+		Size = UDim2.new(1, 0, 0, X.rear.HeaderHeight),
+		LayoutOrder = 0,
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Text = "СЗАДИ",
+		TextSize = 12,
+		TextColor3 = COLORS.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = rearFrame,
+	})
+
+	-- Пул строк: игроки приходят и уходят, пересоздавать метки 10 раз в
+	-- секунду - лишний мусор сборщику (тот же приём, что в списке игроков).
+	local rows = {}
+
+	local function acquireRow(index)
+		local row = rows[index]
+		if not row then
+			local frame = new("Frame", {
+				Name = "Row" .. index,
+				Size = UDim2.new(1, 0, 0, X.rear.RowHeight),
+				BackgroundTransparency = 1,
+				Parent = rearFrame,
+			})
+			local nameLabel = new("TextLabel", {
+				Size = UDim2.new(1, -X.rear.ValueWidth, 1, 0),
+				BackgroundTransparency = 1,
+				Font = Enum.Font.Gotham,
+				Text = "",
+				TextSize = 12,
+				TextColor3 = COLORS.Text,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Parent = frame,
+			})
+			local valueLabel = new("TextLabel", {
+				Size = UDim2.new(0, X.rear.ValueWidth, 1, 0),
+				Position = UDim2.new(1, -X.rear.ValueWidth, 0, 0),
+				BackgroundTransparency = 1,
+				Font = Enum.Font.Gotham,
+				Text = "",
+				TextSize = 12,
+				TextColor3 = COLORS.Muted,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Parent = frame,
+			})
+			row = { frame = frame, name = nameLabel, value = valueLabel }
+			rows[index] = row
+		end
+		row.frame.LayoutOrder = index
+		row.frame.Visible = true
+		return row
+	end
+
+	-- [модель] = { distance, time }. Слабые ключи: персонажи пересоздаются
+	-- каждый раунд, иначе таблица держала бы мёртвые модели.
+	local history = setmetatable({}, { __mode = "k" })
+
+	function X.updateRear()
+		local camera = getCamera()
+		if not camera then
+			rearFrame.Visible = false
+			return
+		end
+
+		local camCF = camera.CFrame
+		local origin = (rootPart and rootPart.Parent) and rootPart.Position or camCF.Position
+
+		-- Всё считаем по горизонтали: разница по высоте на «сзади» не влияет,
+		-- а вертикальную составляющую взгляда она бы только зашумляла.
+		local flatLook = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+		flatLook = flatLook.Magnitude > 1e-3 and flatLook.Unit or Vector3.new(0, 0, -1)
+		local flatRight = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
+		flatRight = flatRight.Magnitude > 1e-3 and flatRight.Unit or Vector3.new(1, 0, 0)
+
+		-- Порог сектора: цель «сзади», если угол между направлением на неё и
+		-- «прямо за спиной» (-flatLook) не больше X.rear.Angle. В скалярном виде
+		-- это forwardDot <= -cos(Angle) (вывод - в комментарии к X.rear.Angle).
+		local rearThreshold = -math.cos(math.rad(X.rear.Angle))
+
+		local now = os.clock()
+		local found = {}
+
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other ~= player then
+				local char = other.Character
+				local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
+				if root then
+					local team = teamNameOf(other, char)
+					local isKiller = team == KILLER_TEAM
+					if not (X.rear.OnlyThreats and not isKiller) then
+						local humanoidOther = char:FindFirstChildOfClass("Humanoid")
+						if not (humanoidOther and humanoidOther.Health <= 0) then
+							local to = root.Position - origin
+							local distance = to.Magnitude
+							local flatTo = Vector3.new(to.X, 0, to.Z)
+							local flatDistance = flatTo.Magnitude
+							if
+								flatDistance > 1e-3
+								and (X.rear.MaxDistance <= 0 or distance <= X.rear.MaxDistance)
+							then
+								local dirUnit = flatTo.Unit
+								if flatLook:Dot(dirUnit) <= rearThreshold then
+									-- тренд сближения по 3D-дистанции
+									local trend = 0
+									local previous = history[char]
+									if previous then
+										local elapsed = now - previous.time
+										if elapsed > 0 then
+											local rate = (distance - previous.distance) / elapsed
+											if rate < -X.rear.Epsilon then
+												trend = -1 -- приближается
+											elseif rate > X.rear.Epsilon then
+												trend = 1 -- отдаляется
+											end
+										end
+									end
+									history[char] = { distance = distance, time = now }
+
+									table.insert(found, {
+										label = other.DisplayName ~= "" and other.DisplayName or other.Name,
+										distance = distance,
+										side = flatRight:Dot(dirUnit), -- >0 справа, <0 слева
+										isKiller = isKiller,
+										color = teamColor(team),
+										trend = trend,
+									})
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- Киллер всегда первым, дальше по возрастанию дистанции.
+		table.sort(found, function(a, b)
+			if a.isKiller ~= b.isKiller then
+				return a.isKiller
+			end
+			return a.distance < b.distance
+		end)
+
+		titleLabel.Text = "СЗАДИ  " .. #found
+
+		local rowIndex = 0
+		local hidden = 0
+
+		for _, info in ipairs(found) do
+			if rowIndex >= X.rear.MaxRows then
+				hidden += 1
+			else
+				rowIndex += 1
+				local row = acquireRow(rowIndex)
+				row.frame.Size = UDim2.new(1, 0, 0, X.rear.RowHeight)
+
+				local name = info.label
+				if info.isKiller then
+					name = "⚠ " .. name
+				end
+				row.name.Font = Enum.Font.Gotham
+				row.name.TextSize = 12
+				row.name.TextColor3 = info.color
+				row.name.Text = name
+
+				-- сторона: куда разворачиваться, чтобы оказаться к цели лицом
+				local sideGlyph = "•"
+				if info.side > 0.35 then
+					sideGlyph = "→"
+				elseif info.side < -0.35 then
+					sideGlyph = "←"
+				end
+
+				-- цвет значения = тренд сближения; стрелка дублирует его текстом
+				local trendGlyph, trendColor = "", COLORS.Muted
+				if info.trend < 0 then
+					trendGlyph, trendColor = " ↓", X.rear.ApproachColor
+				elseif info.trend > 0 then
+					trendGlyph, trendColor = " ↑", X.rear.LeaveColor
+				end
+
+				row.value.TextColor3 = trendColor
+				row.value.Text = string.format("%dm %s%s", math.floor(info.distance + 0.5), sideGlyph, trendGlyph)
+			end
+		end
+
+		if hidden > 0 then
+			rowIndex += 1
+			local row = acquireRow(rowIndex)
+			row.frame.Size = UDim2.new(1, 0, 0, X.rear.RowHeight)
+			row.name.TextColor3 = COLORS.Muted
+			row.name.Text = "+" .. hidden .. " ещё"
+			row.value.Text = ""
+		end
+
+		if rowIndex == 0 then
+			rowIndex += 1
+			local row = acquireRow(rowIndex)
+			row.frame.Size = UDim2.new(1, 0, 0, X.rear.RowHeight)
+			row.name.TextColor3 = COLORS.Muted
+			row.name.Text = "чисто"
+			row.value.Text = ""
+		end
+
+		for index = rowIndex + 1, #rows do
+			rows[index].frame.Visible = false
+		end
+
+		rearFrame.Visible = true
+	end
+
+	function X.applyRear(enabled)
+		rearFrame.Visible = enabled
+		if enabled then
+			X.updateRear() -- иначе панель до X.rear.Interval висит пустой
+		end
+	end
+end
+
 --=========================== ТУМБЛЕРЫ И БИНДЫ ===========================
 
 local FEATURES = {
@@ -4125,6 +4671,8 @@ local FEATURES = {
 			refreshWarningVisibility()
 		end,
 	},
+	{ id = "aimbot", label = "Авто-аим на киллера", apply = X.applyAimbot },
+	{ id = "rear", label = "Панель сзади", apply = X.applyRear },
 }
 
 local FEATURE_BY_ID = {}
@@ -4474,6 +5022,7 @@ end
 ]]
 makeTab("cheats", "Читы", "движение, здоровье, стамина, невидимость")
 makeTab("esp", "ESP", "подсветка игроков сквозь стены")
+makeTab("aim", "Аим", "постоянное наведение камеры на киллера")
 makeTab("list", "Игроки", "панель со списком и стаминой")
 makeTab("block", "Автоблок", "зоны, хитбоксы, замеры")
 makeTab("warning", "Опасность", "баннер о киллере сверху экрана")
@@ -4570,6 +5119,30 @@ makeNote(
 		.. "союзников» - иначе фильтр прятал бы ровно того, кого надо видеть."
 )
 
+setPage("aim")
+makeSection("АВТО-АИМ НА КИЛЛЕРА")
+makeFeatureRow(FEATURE_BY_ID.aimbot)
+makeStepperRow("Радиус", X.aimbot, "MaxDistance", X.aimbot.DistanceStep, X.aimbot.DistanceMin, X.aimbot.DistanceMax, function(value)
+	return value == 0 and "без лимита" or (value .. "m")
+end)
+makeStepperRow("Плавность", X.aimbot, "Smoothness", X.aimbot.SmoothnessStep, X.aimbot.SmoothnessMin, X.aimbot.SmoothnessMax, function(value)
+	return value <= 1 and "мгновенно" or (value .. " кадр.")
+end)
+makeOptionButton("Целиться в голову", X.aimbot, "AimHead")
+makeOptionButton("Только по видимым (не сквозь стены)", X.aimbot, "VisibleOnly")
+makeNote(
+	"Пока включён, камера каждый кадр смотрит на ближайшего живого киллера. "
+		.. "Это жёсткий захват: осмотреться мышью не выйдет, пока чит горит ON. "
+		.. "«Плавность» больше 1 отпускает камеру доворачиваться за несколько "
+		.. "кадров - вести цель мягче, но с небольшим отставанием."
+)
+makeNote(
+	"«Только по видимым» перестаёт наводиться, когда киллер за стеной, - так "
+		.. "камера не выдаёт его положение сквозь препятствия. Наводка держится "
+		.. "на перезаписи камеры каждый кадр; если сборка плейса поставит свою "
+		.. "камеру с бОльшим приоритетом, захват может ослабнуть."
+)
+
 setPage("list")
 makeSection("СПИСОК ИГРОКОВ")
 makeFeatureRow(FEATURE_BY_ID.list)
@@ -4580,6 +5153,27 @@ makeOptionButton("Показывать себя", LIST, "ShowSelf")
 makeNote(
 	"Стамина читается из атрибута StaminaServer - только его сервер "
 		.. "репликует про чужих игроков. Максимум берётся по виду киллера."
+)
+
+makeSection("ПАНЕЛЬ СЗАДИ")
+makeFeatureRow(FEATURE_BY_ID.rear)
+makeStepperRow("Радиус", X.rear, "MaxDistance", X.rear.DistanceStep, X.rear.DistanceMin, X.rear.DistanceMax, function(value)
+	return value == 0 and "без лимита" or (value .. "m")
+end)
+makeStepperRow("Ширина сектора", X.rear, "Angle", X.rear.AngleStep, X.rear.AngleMin, X.rear.AngleMax, function(value)
+	return value .. "°"
+end)
+makeOptionButton("Только киллер", X.rear, "OnlyThreats")
+makeNote(
+	"Панель в правом нижнем углу: кто за спиной, как далеко и куда "
+		.. "разворачиваться (← слева, → справа, • прямо). Цвет строки - тренд: "
+		.. "красный ↓ приближается, зелёный ↑ отдаляется, серый - держит "
+		.. "дистанцию. Киллер помечен ⚠ и всегда сверху."
+)
+makeNote(
+	"«Ширина сектора» - насколько вбок от направления прямо за спиной "
+		.. "показывать цели: 90° - ровно задняя полусфера, больше - захватывает "
+		.. "и то, что чуть сбоку."
 )
 
 setPage("block")
@@ -5038,6 +5632,12 @@ do
 		HITBOX.ShowHits = DEFAULTS.autoblockShowHits
 		STAMINA.NoFatigue = DEFAULTS.staminaNoFatigue
 		WARNING.Distance = DEFAULTS.warningDistance
+		for key, value in pairs(DEFAULTS.aimbot) do
+			X.aimbot[key] = value
+		end
+		for key, value in pairs(DEFAULTS.rear) do
+			X.rear[key] = value
+		end
 		updateZones()
 		-- Слушатель Fatigue зависит от NoFatigue, его надо переставить
 		if state.stamina then
@@ -5335,6 +5935,7 @@ end)
 
 -- ESP рисуется в RenderStepped, чтобы метки не дрожали относительно камеры
 local listAccumulator = 0
+X.rearAccum = 0
 
 RunService.RenderStepped:Connect(function(deltaTime)
 	if state.esp then
@@ -5348,6 +5949,15 @@ RunService.RenderStepped:Connect(function(deltaTime)
 		if listAccumulator >= LIST.Interval then
 			listAccumulator = 0
 			updateList()
+		end
+	end
+
+	-- Панель сзади - тоже текст, тот же приём с таймером, что и у списка.
+	if state.rear then
+		X.rearAccum += deltaTime
+		if X.rearAccum >= X.rear.Interval then
+			X.rearAccum = 0
+			X.updateRear()
 		end
 	end
 
@@ -5667,4 +6277,37 @@ end)
 	   ScrollingFrame, поэтому позиция прокрутки в одной не сбивается при
 	   переходе в другую. Позиция самого окна между запусками не
 	   сохраняется - только настройки.
+
+	13. АВТО-АИМ НА КИЛЛЕРА (тумблер, по умолчанию X) - пока включён, камера
+	   каждый кадр доворачивается на ближайшего живого киллера. Это не
+	   «подкрутка при выстреле», а постоянный лок: осмотреться мышью нельзя,
+	   пока тумблер горит ON. Реализован перезаписью
+	   workspace.CurrentCamera.CFrame в BindToRenderStep с приоритетом
+	   Camera+1 - то есть в том же кадре ПОСЛЕ штатного скрипта камеры, иначе
+	   тот сразу вернул бы поворот к мыши. «Плавность» больше 1 отпускает
+	   камеру доворачиваться за несколько кадров через Lerp: вести цель мягче,
+	   но с отставанием. «Только по видимым» лучом от камеры проверяет, не за
+	   стеной ли киллер, и не наводится сквозь препятствия.
+	   Ограничения: способ держится на том, что мы пишем камеру последними в
+	   кадре. Если сборка плейса поставит собственную камеру с бОльшим
+	   приоритетом или заблокирует CurrentCamera, захват ослабнет или пропадёт.
+	   На сервер наводка не реплицируется - это чисто клиентский обзор; урон
+	   она не наносит и в чужой прицел не вмешивается. Если ты сам киллер,
+	   другого живого киллера обычно нет, и наводиться не на кого - тумблер
+	   просто ничего не делает.
+
+	14. ПАНЕЛЬ «СЗАДИ» (тумблер, по умолчанию C) - маленькая панель в правом
+	   НИЖНЕМ углу: кто находится за спиной и что с ним происходит. Задний
+	   сектор считается по камере: берётся горизонтальный LookVector, и в
+	   панель попадают те, кто в пределах «Ширины сектора» градусов от
+	   направления прямо за спиной. Для каждого - дистанция, сторона
+	   (← слева / → справа / • прямо: куда разворачиваться, чтобы встать к
+	   цели лицом) и тренд сближения по дистанции: красный ↓ приближается,
+	   зелёный ↑ отдаляется, серый - держит дистанцию. Киллер помечен ⚠ и
+	   всегда идёт первым; «Только киллер» убирает из панели остальных.
+	   Пересчёт 10 раз в секунду, как у списка игроков, а не каждый кадр:
+	   это текст, и чаще незачем. Тренд читается из истории дистанций со
+	   слабыми ключами - модели пересоздаются каждый раунд и не удерживаются
+	   от сборки мусора. Это не чит: панель показывает только положения,
+	   которые сервер и так репликует всем клиентам.
 ]]
