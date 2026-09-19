@@ -1,0 +1,14 @@
+# Временные артефакты тестов и сборки
+*.tmp
+out.txt
+test*.lua
+combined*.lua
+harness*.lua
+
+# Локальные конфиги executor'а (не должны лежать в репо)
+AdminMenu/
+last.txt
+
+# Системное
+Thumbs.db
+Desktop.ini

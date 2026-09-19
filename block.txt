@@ -1,0 +1,355 @@
+--// Services
+
+local Players = game:GetService("Players")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RunService = game:GetService("RunService")
+
+local lp = Players.LocalPlayer
+
+local CoreGui = game:GetService("CoreGui")
+
+--// Block settings
+
+local BLOCK_DISTANCE = 15
+
+local watcherEnabled = true
+
+--// Remote
+
+local UseAbility = ReplicatedStorage:WaitForChild("Events"):WaitForChild("RemoteFunctions"):WaitForChild("UseAbility")
+
+--// Killer Configs
+
+local KillerConfigs = {
+
+    ["Pursuer"] = {
+
+        enabled = true,
+
+        check = function(_, ws)
+
+            local valid = {4,6,8,10,12,14,16,20}
+
+            for _, v in ipairs(valid) do if ws == v then return true end end
+
+            return false
+
+        end
+
+    },
+
+    ["Artful"] = {
+
+        enabled = true,
+
+        check = function(_, ws)
+
+            local valid = {4,8,12,16,20,9,13,17,21}
+
+            for _, v in ipairs(valid) do if ws == v then return true end end
+
+            return false
+
+        end
+
+    },
+
+    ["Badware"] = {
+
+        enabled = true,
+
+        check = function(_, ws)
+
+            local valid = {4,8,12,16,20,24}
+
+            for _, v in ipairs(valid) do if ws == v then return true end end
+
+            return false
+
+        end
+
+    },
+
+    ["Harken"] = {
+
+        enabled = true,
+
+        check = function(playerFolder, ws)
+
+            local enraged = playerFolder:GetAttribute("Enraged")
+
+            if enraged then
+
+                local seq = {7.5,13.5,17.5,21.5,25.5}
+
+                for _, v in ipairs(seq) do if ws == v then return true end end
+
+            else
+
+                local seq = {4,8,12,16,20}
+
+                for _, v in ipairs(seq) do if ws == v then return true end end
+
+            end
+
+            return false
+
+        end
+
+    },
+
+    ["Killdroid"] = {
+
+        enabled = true,
+
+        check = function(_, ws)
+
+            local valid = {-4,0,4,12,16,20}
+
+            for _, v in ipairs(valid) do if ws == v then return true end end
+
+            return false
+
+        end
+
+    }
+
+}
+
+--// Helpers
+
+local function sendBlock()
+
+    local args = {"Block"}
+
+    UseAbility:InvokeServer(unpack(args))
+
+end
+
+local function getWalkSpeedModifier(killer)
+
+    local val = killer:GetAttribute("WalkSpeedModifier")
+
+    if val then return val end
+
+    return 0
+
+end
+
+local function getDistanceFromPlayer(killer)
+
+    if killer:FindFirstChild("HumanoidRootPart") and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+
+        return (killer.HumanoidRootPart.Position - lp.Character.HumanoidRootPart.Position).Magnitude
+
+    end
+
+    return math.huge
+
+end
+
+--// Table lưu log
+
+local Logged = {}
+
+--// Main check
+
+local function checkAndBlock(killer)
+
+    if not watcherEnabled then return end
+
+    if not killer then return end
+
+    local ws = getWalkSpeedModifier(killer)
+
+    local name = killer:GetAttribute("KillerName")
+
+    if not name then return end
+
+    local config = KillerConfigs[name]
+
+    if not config or not config.enabled then return end
+
+    if getDistanceFromPlayer(killer) > BLOCK_DISTANCE then return end
+
+    if config.check(killer, ws) then
+
+        sendBlock()
+
+        -- Log 1 lần mỗi 3 giây
+
+        Logged[killer] = Logged[killer] or {}
+
+        if not Logged[killer][ws] then
+
+            print("[AutoBlock] "..name.." ("..killer.Name..") WalkSpeedModifier = "..ws.." -> blocked")
+
+            Logged[killer][ws] = true
+
+            task.delay(3, function()
+
+                Logged[killer][ws] = nil
+
+            end)
+
+        end
+
+    end
+
+end
+
+--// Monitor killer
+
+local function monitorKiller(killer)
+
+    if not killer then return end
+
+    checkAndBlock(killer)
+
+    killer.AttributeChanged:Connect(function(attr)
+
+        if attr == "WalkSpeedModifier" or attr == "KillerName" or attr == "Enraged" then
+
+            checkAndBlock(killer)
+
+        end
+
+    end)
+
+end
+
+--// Hook killers folder
+
+local killersFolder = workspace:WaitForChild("GameAssets"):WaitForChild("Teams"):WaitForChild("Killer")
+
+for _, killer in pairs(killersFolder:GetChildren()) do
+
+    monitorKiller(killer)
+
+end
+
+killersFolder.ChildAdded:Connect(monitorKiller)
+
+--// Rayfield GUI
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+
+    Name = "Killer AutoBlock",
+
+    LoadingTitle = "Auto Block",
+
+    LoadingSubtitle = "by ChatGPT",
+
+})
+
+local tab = Window:CreateTab("Killers", 4483362458)
+
+for killerName, cfg in pairs(KillerConfigs) do
+
+    tab:CreateToggle({
+
+        Name = "Enable "..killerName,
+
+        CurrentValue = cfg.enabled,
+
+        Callback = function(val)
+
+            cfg.enabled = val
+
+        end
+
+    })
+
+end
+
+tab:CreateSlider({
+
+    Name = "Block Distance",
+
+    Range = {5,50},
+
+    Increment = 1,
+
+    Suffix = "studs",
+
+    CurrentValue = BLOCK_DISTANCE,
+
+    Callback = function(val)
+
+        BLOCK_DISTANCE = val
+
+    end
+
+})
+
+--// GUI Cooldown (chỉ hiển thị)
+
+local CooldownGUI = Instance.new("ScreenGui")
+
+CooldownGUI.Name = "AutoBlockCooldown"
+
+CooldownGUI.ResetOnSpawn = false
+
+CooldownGUI.Parent = CoreGui
+
+local CooldownFrame = Instance.new("Frame")
+
+CooldownFrame.Size = UDim2.new(0, 60, 0, 20)
+
+CooldownFrame.Position = UDim2.new(1, -5, 0, -50)
+
+CooldownFrame.AnchorPoint = Vector2.new(1,0)
+
+CooldownFrame.BackgroundTransparency = 1
+
+CooldownFrame.BorderSizePixel = 0
+
+CooldownFrame.ZIndex = 1000
+
+CooldownFrame.Parent = CooldownGUI
+
+local cooldownLabel = Instance.new("TextLabel")
+
+cooldownLabel.Size = UDim2.new(1,0,1,0)
+
+cooldownLabel.BackgroundTransparency = 1
+
+cooldownLabel.TextColor3 = Color3.fromRGB(0,255,0)
+
+cooldownLabel.Font = Enum.Font.SourceSansBold
+
+cooldownLabel.TextScaled = true
+
+cooldownLabel.Text = "Ready"
+
+cooldownLabel.ZIndex = 1001
+
+cooldownLabel.Parent = CooldownFrame
+
+--// Cập nhật cooldown từ người dùng script
+
+local function updateCooldown()
+
+    local survivorFolder = workspace:FindFirstChild("GameAssets") 
+
+        and workspace.GameAssets:FindFirstChild("Teams") 
+
+        and workspace.GameAssets.Teams:FindFirstChild("Survivor") 
+
+        and workspace.GameAssets.Teams.Survivor:FindFirstChild(lp.Name)
+
+    if survivorFolder then
+
+        local onCD = survivorFolder:GetAttribute("BlockCooldown")
+
+        cooldownLabel.Text = onCD and "On Cooldown" or "Ready"
+
+    end
+
+end
+
+RunService.Heartbeat:Connect(updateCooldown)
