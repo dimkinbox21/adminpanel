@@ -6,24 +6,32 @@
 	Функции: Fly, Noclip, Godmode (локальный), бесконечная стамина,
 	невидимость, ESP (метки цветом команды - как в списке игроков,
 	отдельная метка Caretaker и указатели 360 на тех, кто вне экрана),
-	список игроков, автоблок, предупреждение о киллере.
+	список игроков, автоблок, предупреждение о киллере,
+	аим на киллера по горизонтали, авто-бег с менеджментом стамины.
 
 	Клавиши по умолчанию: RightCtrl - меню, F - Fly, N - Noclip, G - Godmode,
 	H - бесконечная стамина, J - невидимость, E - ESP, T - список игроков,
-	B - автоблок, K - предупреждение о киллере.
+	B - автоблок, K - предупреждение о киллере, X - аим, LeftShift - клавиша
+	спринта (зажимается авто-бегом).
 	Все бинды переназначаются в меню: жми кнопку с названием клавиши справа
 	от тумблера и нажми новую клавишу (Escape - отмена).
 	В полёте: WASD - движение, Space - вверх, LeftShift - вниз.
+	При включённом полёте авто-бег НЕ трогает клавишу спринта: она там
+	означает «вниз».
 
 	Окно широкое, с вкладками слева: Читы, ESP, Игроки, Автоблок, Опасность,
-	Конфиг. Каждая вкладка - свой скролл, поэтому позиция в одной не
-	сбивается при переходе в другую.
+	Конфиг. На «Читах» - Fly, Noclip, Godmode, стамина, невидимость, Аим
+	и Бег (авто-бег + менеджмент стамины + паника). Каждая вкладка - свой
+	скролл, поэтому позиция в одной не сбивается при переходе в другую.
 
 	Автоблок сам ставит блок, когда киллер рядом начинает атаку. Работает
 	только через executor: нажатие отправляется VirtualInputManager, а этому
 	сервису нужны его права. Без них тумблер серый - см. заметку 9 в конце.
 	Если в этом раунде ты САМ киллер, автоблок и предупреждение отключаются
 	автоматически: блока у киллера нет, а предупреждать его не о чем.
+
+	Аим и авто-бег тоже требуют executor (тот же VirtualInputManager);
+	в бою НЕ проверены - см. заметки 13 и 14 в конце.
 
 	Настройки и бинды сохраняются ПО КНОПКЕ на вкладке «Конфиг» - в файл
 	AdminMenu/<имя профиля>.json (нужен executor с writefile) и в память
@@ -34,6 +42,12 @@
 
 	Всё работает только на клиенте. Проверки по UserId больше нет - меню
 	откроется у любого, кто запустил файл. См. заметки в конце файла.
+
+	СКРИПТ РАЗДЕЛЁН НА МОДУЛИ: AdminMenuModules/*.luau + загрузчик
+	AdminMenuLoader.client.lua (читает readfile-ом, склеивает и запускает).
+	Для Studio используется собранный AdminMenu.client.lua (перегенерируется
+	build_menu.py из тех же модулей). Правки вносить В МОДУЛИ, не в
+	собранный файл.
 ]]
 
 local Players = game:GetService("Players")
@@ -68,6 +82,8 @@ local BINDS = {
 	list = Enum.KeyCode.T,
 	autoblock = Enum.KeyCode.B,
 	warning = Enum.KeyCode.K,
+	aim = Enum.KeyCode.X, -- аим на киллера (40_auto)
+	autobrun = Enum.KeyCode.LeftShift, -- клавиша спринта, зажимается авто-бегом
 }
 
 local FLY_KEYS = {
@@ -100,6 +116,8 @@ local ESP = {
 	OffScreenMargin = 34, -- отступ рамки указателей от края экрана, px
 	OffScreenSize = 26, -- размер стрелки, px
 	OffScreenThickness = 3, -- толщина полосок, из которых собрана стрелка
+	-- Аим на киллера (40_auto): скорость поворота камеры, град/с.
+	AimSpeed = 480,
 }
 
 --[[
@@ -505,6 +523,7 @@ local hasFileApi, hasAnyStore, hasSessionStore = false, false, false
 local configLoaded, configSource
 local onConfigDirtyChanged = nil -- ставится после сборки меню
 local DEFAULTS, BIND_IDS, keyCodeFromName
+local RUN -- заполняет 40_auto; applyRunFromConfig должен видеть таблицу по ссылке
 
 do
 	local CONFIG_FOLDER = "AdminMenu"
@@ -723,6 +742,7 @@ do
 			TeamCheck = ESP.TeamCheck,
 			MarkCaretaker = ESP.MarkCaretaker,
 			MaxDistance = ESP.MaxDistance,
+			AimSpeed = ESP.AimSpeed,
 		},
 		list = {
 			Distance = LIST.Distance,
@@ -738,6 +758,13 @@ do
 		autoblockShowHits = HITBOX.ShowHits,
 		staminaNoFatigue = STAMINA.NoFatigue,
 		warningDistance = WARNING.Distance,
+		run = {
+			managed = false,
+			low = 30,
+			resume = 15,
+			panicDistance = 25,
+			panicFloor = 3,
+		},
 	}
 
 	-- В файл попадает только то, что правится из меню. FLY.Step/Min/Max и
@@ -769,6 +796,8 @@ do
 		"list",
 		"autoblock",
 		"warning",
+		"aim",
+		"autobrun",
 	}
 	BIND_IDS = BIND_IDS_LOCAL
 
@@ -842,6 +871,13 @@ do
 		if type(maxDistance) == "number" and maxDistance == maxDistance then
 			ESP.MaxDistance = math.clamp(math.floor(maxDistance), 0, ESP.DistanceLimit)
 		end
+
+		-- Скорость аима (40_auto). Диапазон 60-1440: ниже 60 поворот заметно
+		-- тупит, выше 1440 - мгновенный рывок на весь угол.
+		local aimSpeed = esp.aimSpeed
+		if type(aimSpeed) == "number" and aimSpeed == aimSpeed then
+			ESP.AimSpeed = math.clamp(math.floor(aimSpeed), 60, 1440)
+		end
 	end
 
 	-- Мутируем таблицы на месте: замыкания кнопок UI держат ссылки на них.
@@ -903,6 +939,33 @@ do
 		end
 	end
 
+	-- Авто-бег / менеджмент стамины (40_auto). Секция появилась позже
+	-- остальных: старые конфиги без неё просто пропускаются.
+	-- RUN.MANAGED - тумблер: в конфиг пишется состояние, а не бинд.
+	-- RUN объявлен ВЫШЕ (форвард-локал перед конфиг-блоком): applyRunFromConfig
+	-- в замыкании task.defer должен захватить ТАБЛИЦУ, а не глобал. Таблицу
+	-- заполняет 40_auto позже, замыкание видит её по ссылке.
+	local function applyRunFromConfig(run)
+		if type(run) ~= "table" or type(RUN) ~= "table" then
+			return
+		end
+		if type(run.managed) == "boolean" then
+			RUN.Managed = run.managed
+		end
+		if type(run.low) == "number" and run.low == run.low then
+			RUN.Low = math.clamp(math.floor(run.low), 5, 90)
+		end
+		if type(run.resume) == "number" and run.resume == run.resume then
+			RUN.Resume = math.clamp(math.floor(run.resume), 5, 40)
+		end
+		if type(run.panicDistance) == "number" and run.panicDistance == run.panicDistance then
+			RUN.PanicDistance = math.clamp(math.floor(run.panicDistance), 10, 100)
+		end
+		if type(run.panicFloor) == "number" and run.panicFloor == run.panicFloor then
+			RUN.PanicFloor = math.clamp(math.floor(run.panicFloor), 1, 5)
+		end
+	end
+
 	-- Мутируем таблицы на месте: замыкания кнопок UI держат ссылки на них.
 	local function applyConfigTable(data)
 		applyBindsFromConfig(data.binds)
@@ -912,6 +975,7 @@ do
 		applyAutoblockFromConfig(data.autoblock)
 		applyStaminaFromConfig(data.stamina)
 		applyWarningFromConfig(data.warning)
+		applyRunFromConfig(data.run)
 	end
 
 	--[[
@@ -953,7 +1017,7 @@ do
 			binds[bindId] = BINDS[bindId].Name -- Enum в JSON не кодируется, пишем имя
 		end
 
-		local esp = { maxDistance = ESP.MaxDistance }
+		local esp = { maxDistance = ESP.MaxDistance, aimSpeed = ESP.AimSpeed }
 		for _, key in ipairs(ESP_SAVED_FLAGS) do
 			esp[ESP_JSON_KEYS[key]] = ESP[key]
 		end
@@ -961,6 +1025,20 @@ do
 		local list = {}
 		for _, key in ipairs(LIST_SAVED_FLAGS) do
 			list[LIST_JSON_KEYS[key]] = LIST[key]
+		end
+
+		-- RUN может не существовать при стартовой загрузке (определяется в
+		-- 40_auto, которое идёт позже): секция run тогда не пишется. Стартовая
+		-- загрузка отложена через task.defer, поэтому на практике RUN живой.
+		local runSection = nil
+		if type(RUN) == "table" then
+			runSection = {
+				managed = RUN.Managed,
+				low = RUN.Low,
+				resume = RUN.Resume,
+				panicDistance = RUN.PanicDistance,
+				panicFloor = RUN.PanicFloor,
+			}
 		end
 
 		return {
@@ -979,6 +1057,7 @@ do
 			},
 			stamina = { noFatigue = STAMINA.NoFatigue },
 			warning = { distance = WARNING.Distance },
+			run = runSection,
 		}
 	end
 
@@ -1118,6 +1197,12 @@ do
 		Стартовая загрузка. Имя профиля берётся из файла last.txt (или из
 		памяти сессии, если файлов нет): без этого скрипт после перезапуска
 		всегда открывал бы "default", даже если работа шла в другом профиле.
+
+		Загрузка ОТЛОЖЕНА через task.defer: RUN (40_auto) определяется ПОЗЖЕ
+		конфига в том же чанке, и синхронный вызов видел бы nil. Отложенный
+		вызов стартует после выполнения всего чанка - к этому моменту RUN
+		живой, и значения из конфига применяются полностью. Диагностика
+		файлового API печатается вместе с ней.
 	]]
 	local remembered = readLastProfile()
 	if not remembered and sessionStore then
@@ -1132,7 +1217,8 @@ do
 		configName = remembered
 	end
 
-	configLoaded, configSource = loadConfig()
+	task.defer(function()
+		configLoaded, configSource = loadConfig()
 
 	--=========================== КОНФИГ: ДИАГНОСТИКА ===========================
 
@@ -1173,6 +1259,7 @@ do
 			)
 		)
 	end
+	end)
 end
 
 --=========================== СОСТОЯНИЕ ===========================
@@ -1187,6 +1274,8 @@ local state = {
 	list = false,
 	autoblock = false,
 	warning = true, -- предупреждение о киллере полезно сразу, без включения
+	aim = false, -- аим на киллера по горизонтали (40_auto)
+	autobrun = false, -- авто-бег (40_auto)
 }
 
 local character, humanoid, rootPart
@@ -1462,8 +1551,12 @@ local teamNameOf
 	Внутренности ESP спрятаны в do-блок ради лимита Luau на 200 локалов
 	верхнего уровня. Наружу выходят три функции: обновление каждый кадр,
 	выключение и точечное гашение подсветок/трейсеров для кнопок настроек.
+	Плюс aimPointOf - точка прицела в теле, её читает аим (40_auto).
+	Тот же форвард-локальный приём, что у teamNameOf выше: определена
+	внутри блока БЕЗ local.
 ]]
 local updateEsp, applyEsp, hideEspVisuals
+local aimPointOf
 
 do
 	--[[
@@ -1837,7 +1930,8 @@ do
 	]]
 	local TORSO_NAMES = { "UpperTorso", "Torso" }
 
-	local function aimPointOf(char, root)
+	-- Без local: имя объявлено форвард-локалом выше, его читает аим (40_auto).
+	function aimPointOf(char, root)
 		for _, name in ipairs(TORSO_NAMES) do
 			local part = char:FindFirstChild(name)
 			if part and part:IsA("BasePart") then
@@ -2420,6 +2514,11 @@ end
 	Отдельный ScreenGui, а не часть меню: список должен быть виден, когда
 	меню закрыто. Собственный DisplayOrder ниже меню, чтобы окно настроек
 	перекрывало панель, а не наоборот.
+
+	НЕ в do-блоке: updateList/applyList (30_combat) читают почти все
+	локалы секции (listRows, write*, teamRank/teamColor, GUI-объекты,
+	флаги отчёта стамины), и вынесенного форвард-списка вышло бы больше,
+	чем экономия. Экономия локалов сделана в do-блоке ИНТЕРФЕЙСА ниже.
 ]]
 
 local listGui = new("ScreenGui", {
@@ -2613,7 +2712,6 @@ end
 	лежит в workspace.GameAssets.Teams.Killer. Пересчитывается по таймеру
 	(раунды меняются, и роль вместе с ними), а не запоминается один раз.
 ]]
-local selfIsKiller = false
 
 local function updateSelfRole()
 	local wasKiller = selfIsKiller
@@ -2658,8 +2756,8 @@ local function readNumberAttribute(char, keys)
 	return nil, nil
 end
 
-local staminaKeyReported = false
-local staminaMissReported = false
+staminaKeyReported = false
+staminaMissReported = false
 
 --[[
 	Максимум стамины персонажа.
@@ -4111,6 +4209,390 @@ local function applyAutoblock(enabled)
 	refreshAutoblockStatus()
 end
 
+--=========================== АИМ НА КИЛЛЕРА ===========================
+--[[
+	Постоянный аим на убийцу по оси X (просьба пользователя): камера
+	поворачивается за ближайшим ЖИВЫМ киллером по горизонтали, вертикаль
+	остаётся под мышкой.
+
+	ГЛАВНОЕ РЕШЕНИЕ: направление считается ПО ОСЯМ КАМЕРЫ, а не по
+	WorldToViewportPoint. Проекция точки ЗА камерой зеркалится, и стрелка
+	по ней показывала бы в противоположную сторону (та же причина, по
+	которой 360-указатели считают по проекциям направления - см. ESP 360
+	в заметках).
+
+	Знак поворота (проверено): CFrame.Angles(0, theta, 0) с положительным
+	theta крутит ВЛЕВО. atan2 по векторному произведению даёт именно его.
+
+	BindToRenderStep на Camera.Value + 1 ОБЯЗАТЕЛЬНО, не RenderStepped:Connect:
+	дефолтный контроллер камеры пишет CFrame на приоритете Camera (200), и
+	запись из обычного RenderStepped он затирал бы - аим бы не работал.
+]]
+
+-- За весь do-блок наружу выходят только то, что нужно снаружи:
+-- RUN (10_config/50_ui), autobrunStep (Stepped в 50_ui),
+-- refreshRunStatus (50_ui). aimStep и runDecision используются ТОЛЬКО
+-- внутри блока - не выносить. Объявление РЯДОМ с блоком авто-бега ниже.
+-- aimStep объявляется внутри do-блока аима ниже (локальная функция блока).
+
+do
+	--[[
+		Ближайший ЖИВОЙ киллер. СВОЙ цикл, а не nearestKiller из блока
+		баннера: тот локальный внутри do-блока и наружу не выходит. Обход
+		тот же: Players + teamNameOf, поэтому манекен "Killer Dummy" из
+		Teams.Killer не игрок и не попадает. Мёртвые отфильтрованы:
+		аим на труп хуже отсутствия аима.
+	]]
+	local function nearestAliveKiller(origin)
+		local bestChar, bestRoot, bestDistance = nil, nil, nil
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other ~= player then
+				local char = other.Character
+				local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
+				if root and teamNameOf(other, char) == KILLER_TEAM then
+					local humanoidOther = char:FindFirstChildOfClass("Humanoid")
+					-- Мёртвый киллер не угроза (в этом плейсе он бывает мёртв)
+					if not (humanoidOther and humanoidOther.Health <= 0) then
+						local d = (root.Position - origin).Magnitude
+						if not bestDistance or d < bestDistance then
+							bestChar, bestRoot, bestDistance = char, root, d
+						end
+					end
+				end
+			end
+		end
+		return bestChar, bestRoot, bestDistance
+	end
+
+	--[[
+		ЧИСТЫЙ хелпер (тестируется без Roblox): на сколько надо довернуть
+		камеру по горизонтали, чтобы взгляд (flatLook) совпал с направлением
+		на киллера (flatDir). Оба вектора плоские (Y = 0).
+
+		Знак: положительный результат = ВЛЕВО. Проверка: взгляд (0,0,-1)
+		(в камере «вперёд»), киллер на +X (справа) -> crossY = (-1)*1 - 0 = -1,
+		atan2(-1, 0) = -pi/2 -> доворот вправо. Верно.
+
+		Локален внутри блока: наружу не выходит, тестируется вырезанием.
+	]]
+	local function computeYawDelta(flatLook, flatDir)
+		local lookMag = flatLook.Magnitude
+		local dirMag = flatDir.Magnitude
+		--[[
+			Unit нулевого вектора в Roblox НЕ бросает ошибку, а даёт NaN.
+			Взгляд строго вверх/вниз или киллер ровно над головой - таких
+			случаев здесь быть не должно, кадр просто пропускается.
+		]]
+		if lookMag < 1e-3 or dirMag < 1e-3 then
+			return nil
+		end
+
+		local normalizedLook = flatLook / lookMag
+		local normalizedDir = flatDir / dirMag
+
+		local dot = normalizedLook:Dot(normalizedDir)
+		local crossY = normalizedLook.Z * normalizedDir.X - normalizedLook.X * normalizedDir.Z
+
+		local deltaYaw = math.atan2(crossY, dot)
+		if math.abs(deltaYaw) < 1e-4 then
+			return nil
+		end
+		return deltaYaw
+	end
+
+	function aimStep(deltaTime)
+		if not state.aim then
+			return
+		end
+		if not (rootPart and rootPart.Parent) then
+			return
+		end
+
+		local killerChar, killerRoot = nearestAliveKiller(rootPart.Position)
+		if not (killerChar and killerRoot) then
+			return
+		end
+
+		-- Точка цели - в теле (тот же aimPointOf, что у трейсеров и стрелок):
+		-- у кастомных моделей киллеров HRP лежит в ступнях.
+		local aimTarget = aimPointOf(killerChar, killerRoot)
+		if not aimTarget then
+			return
+		end
+
+		local camera = getCamera()
+
+		-- Плоские векторы: вертикаль не трогаем, она остаётся под мышкой
+		local flatLook = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+		local flatDir = Vector3.new(aimTarget.X - rootPart.Position.X, 0, aimTarget.Z - rootPart.Position.Z)
+
+		local deltaYaw = computeYawDelta(flatLook, flatDir)
+		if not deltaYaw then
+			return
+		end
+
+		-- Кап шага: без него прицел дёргался бы рывком на весь угол
+		local maxStep = math.rad(ESP.AimSpeed) * deltaTime
+		if deltaYaw > maxStep then
+			deltaYaw = maxStep
+		elseif deltaYaw < -maxStep then
+			deltaYaw = -maxStep
+		end
+
+		-- Аддитивный поворот поверх контроллера: pitch и roll сохраняются
+		camera.CFrame = camera.CFrame * CFrame.Angles(0, deltaYaw, 0)
+	end
+end
+
+-- Кам+1: запись должна прийти ПОСЛЕ записи дефолтного контроллера камеры
+pcall(function()
+	RunService:BindToRenderStep(
+		"AdminMenuAim",
+		Enum.RenderPriority.Camera.Value + 1,
+		function(deltaTime)
+			aimStep(deltaTime)
+		end
+	)
+end)
+
+--=========================== АВТО-БЕГ / МЕНЕДЖМЕНТ СТАМИНЫ ===========================
+--[[
+	Просьба пользователя: авто-бег (скрипт сам зажимает клавишу спринта)
+	и авто-менеджмент стамины.
+
+	МЕНЕДЖМЕНТ = пороги с гистерезисом: при стамине <= порога клавиша
+	отпускается, при >= порога + запаса - зажимается снова. Стамина
+	тратится по правилам игры.
+
+	ПАНИКА (просьба пользователя: «если убийца очень рядом можно забить
+	лимиты, но не спускать стамину до нуля, а оставлять 1-5 единиц»):
+	когда киллер ближе RUN.PanicDistance, обычный порог игнорируется и
+	порогом становится RUN.PanicFloor (1-5). То есть вблизи киллера бежим
+	даже на низкой стамине, но не в ноль.
+
+	Клавиша зажимается через VirtualInputManager - тем же способом, что и
+	автоблок (pressBlockKey): метка syntheticKey ДО отправки, отпускание
+	с копией клавиши. Свои флаги доступности НЕ заводим: состояние то же,
+	что у автоблока.
+
+	ЧТО НЕ ДЕЛАЕТ: скорость бега выше штатной. Если плейс режет спринт
+	через DisableSprint или WalkSpeedModifier - стамина не поможет
+	(ср. esp.txt «No Speed Debuffs», не сделано).
+
+	ПОЧЕМУ КЛАВИША, А НЕ АТРИБУТ: спринт в игре включается зажатием
+	(сказал пользователь), и клиентский код плейса читает ввод сам.
+	Запись атрибута Sprinting ничего бы не дала - его перезаписывает
+	клиент плейса каждый кадр.
+]]
+
+-- За блок наружу: autobrunStep (Stepped в 50_ui) и refreshRunStatus
+-- (50_ui). RUN объявлён форвард-локалом В КОНФИГЕ (10_config, выше по
+-- файлу): applyRunFromConfig в замыкании task.defer должен видеть
+-- ТАБЛИЦУ по ссылке, а не глобал. aimStep и runDecision используются
+-- ТОЛЬКО внутри блока - не выносить.
+local autobrunStep
+local refreshRunStatus
+
+RUN = {
+	Managed = false, -- менеджмент стамины (без своего бинда: makeBindButton
+	-- читал бы несуществующий BINDS["staminamgr"])
+	Low = 30, -- порог: ниже - отпускаем спринт
+	Resume = 15, -- запас: зажимаем снова при >= Low + Resume
+	PanicDistance = 25, -- киллер ближе - режим паники
+	PanicFloor = 3, -- в панике порог = 1-5 (шаг степпера 1)
+	HoldKey = nil, -- клавиша спринта, берётся из BINDS.autobrun при каждом шаге
+}
+
+do
+	-- Флаг «клавиша сейчас зажата скриптом». Переходы только по фронту:
+	-- press/release отправляются по одному разу, не каждый кадр.
+	local heldByScript = false
+
+	-- Копия зажатой клавиши для отпускания: к моменту отпуска blockKey мог
+	-- смениться раундом (тот же приём, что в pressBlockKey).
+	local heldKey = nil
+
+	--[[
+		ЧИСТЫЙ хелпер (тестируется без Roblox). Решение по стамине:
+		  "release" - отпустить (стамина <= порога);
+		  "press"   - зажать (стамина >= порога + запаса);
+		  nil       - ничего не делать (гистерезисная полоса).
+	]]
+	function runDecision(stamina, threshold, resumeBand, held)
+		if stamina <= threshold then
+			return held and "release" or nil
+		end
+		if stamina >= threshold + resumeBand then
+			return not held and "press" or nil
+		end
+		return nil
+	end
+
+	-- Ближайший живой киллер для паники. Своего цикла здесь НЕ надо:
+	-- nearestKillerDistance (секция ЗОНЫ АВТОБЛОКА) уже top-level и возвращает
+	-- число до ближайшего киллера. Мёртвые в нём не фильтруются, но для паники
+	-- это безопасно: мёртвый киллер не бьёт, а лишний спринт на труп - не беда.
+	local function killerIsNear()
+		if not rootPart then
+			return false
+		end
+		local distance = nearestKillerDistance()
+		return distance ~= nil and distance <= RUN.PanicDistance
+	end
+
+	function autobrunStep()
+	-- 1) Оба тумблера выключены -> отпустить, если зажато нами
+	if not (state.autobrun or RUN.Managed) then
+		if heldByScript then
+			heldByScript = false
+			local releaseKey = heldKey
+			heldKey = nil
+			if releaseKey then
+				pcall(function()
+					syntheticKey = releaseKey
+					syntheticUntil = os.clock() + 0.1
+					VirtualInputManager:SendKeyEvent(false, releaseKey, false, game)
+				end)
+			end
+		end
+		return
+	end
+
+	-- 2) Нет доступа к вводу -> трогать нечем (тумблер серый, см. 50_ui)
+	if not autoblockInputAvailable or autoblockInputBlocked then
+		return
+	end
+
+	-- 3) ПОЛЁТ -> НЕ трогать клавишу: LeftShift в полёте это ВНИЗ (FLY_KEYS),
+	--    авто-бег жёг бы спуск. Зажатое отпускаем.
+	if state.fly then
+		if heldByScript then
+			heldByScript = false
+			local releaseKey = heldKey
+			heldKey = nil
+			if releaseKey then
+				pcall(function()
+					syntheticKey = releaseKey
+					syntheticUntil = os.clock() + 0.1
+					VirtualInputManager:SendKeyEvent(false, releaseKey, false, game)
+				end)
+			end
+		end
+		return
+	end
+
+	-- 4) Нет персонажа или мёртв -> отпустить, выйти. Стоит ПОСЛЕ гейта
+	--    на ввод: на смерти/респавне клавишу надо отпустить, а не выйти
+	--    с зажатой.
+	if not (character and character.Parent and humanoid) or humanoid.Health <= 0 then
+		if heldByScript then
+			heldByScript = false
+			local releaseKey = heldKey
+			heldKey = nil
+			if releaseKey then
+				pcall(function()
+					syntheticKey = releaseKey
+					syntheticUntil = os.clock() + 0.1
+					VirtualInputManager:SendKeyEvent(false, releaseKey, false, game)
+				end)
+			end
+		end
+		return
+	end
+
+	-- 5) Стамина своего персонажа. Нет числа -> не гадать.
+	local stamina = readNumberAttribute(character, STAMINA_KEYS)
+	if stamina == nil then
+		return
+	end
+
+	-- 6) Порог: паника игнорирует Low, но не спускает ниже PanicFloor
+	local threshold = RUN.Low
+	if RUN.Managed and killerIsNear() then
+		threshold = RUN.PanicFloor
+	end
+
+	-- 7) Решение. При включённом только «Авто-бег» (без менеджмента)
+	--    пороги не работают: бегаем всегда, гейт только по состоянию.
+	local decision
+	if not RUN.Managed then
+		-- Чистый авто-бег: держим клавишу постоянно, пока тумблер включён
+		decision = not heldByScript and "press" or nil
+	else
+		decision = runDecision(stamina, threshold, RUN.Resume, heldByScript)
+	end
+
+	if decision == "press" then
+		heldByScript = true
+		heldKey = BINDS.autobrun
+		syntheticKey = heldKey
+		syntheticUntil = os.clock() + 0.1
+		local ok = pcall(function()
+			VirtualInputManager:SendKeyEvent(true, heldKey, false, game)
+		end)
+		if not ok then
+			heldByScript = false
+			heldKey = nil
+			autoblockInputBlocked = true
+			warn("[AdminMenu] авто-бег: VirtualInputManager отказал - тумблер погашен. " .. "Нужен executor, у обычного LocalScript прав нет.")
+		end
+	elseif decision == "release" then
+		heldByScript = false
+		local releaseKey = heldKey
+		heldKey = nil
+		if releaseKey then
+			-- Метка до отправки: событие ввода прилетает синхронно
+			pcall(function()
+				syntheticKey = releaseKey
+				syntheticUntil = os.clock() + 0.1
+				VirtualInputManager:SendKeyEvent(false, releaseKey, false, game)
+			end)
+		end
+	end
+end
+
+--[[
+	Статус на вкладке «БЕГ» (50_ui). Ставится после сборки меню: фабрика
+	строк возвращает label, ему присваивается эта функция. Вызывается из
+	4-Гц блока RenderStepped при открытом меню.
+]]
+function refreshRunStatus(statusLabel)
+	if not statusLabel then
+		return
+	end
+	if not (state.autobrun or RUN.Managed) then
+		statusLabel.Text = "Авто-бег выключен."
+		statusLabel.TextColor3 = COLORS.Muted
+		return
+	end
+	if not autoblockInputAvailable or autoblockInputBlocked then
+		statusLabel.Text = "Авто-бег: нет доступа к вводу (VirtualInputManager отсутствует)."
+		statusLabel.TextColor3 = COLORS.Danger
+		return
+	end
+	if not (character and character.Parent and humanoid) or humanoid.Health <= 0 then
+		statusLabel.Text = "Авто-бег: персонажа нет."
+		statusLabel.TextColor3 = COLORS.Muted
+		return
+	end
+
+	local stamina = readNumberAttribute(character, STAMINA_KEYS)
+	local staminaText = stamina ~= nil and math.floor(stamina) .. "%" or "нет данных"
+
+	local killerText = ""
+	if RUN.Managed and killerIsNear() then
+		killerText = " · ПАНИКА (киллер ближе " .. RUN.PanicDistance .. " м)"
+	end
+
+	if heldByScript then
+		statusLabel.Text = "Стамина " .. staminaText .. " · спринт зажат скриптом" .. killerText
+		statusLabel.TextColor3 = COLORS.On
+	else
+		statusLabel.Text = "Стамина " .. staminaText .. " · спринт отпущен (порог " .. (RUN.Managed and RUN.PanicFloor or RUN.Low) .. ")" .. killerText
+		statusLabel.TextColor3 = COLORS.Muted
+	end
+end
+end -- do-блок авто-бега (лимит 200 локалов)
 --=========================== ТУМБЛЕРЫ И БИНДЫ ===========================
 
 local FEATURES = {
@@ -4133,6 +4615,21 @@ local FEATURES = {
 		apply = function()
 			refreshWarningVisibility()
 		end,
+	},
+	--[[
+		Аим и авто-бег (40_auto): apply no-op, как у предупреждения -
+		отпускание клавиши и остановка поворота делает сама step-функция
+		в следующем кадре. Состояние ставит setFeature.
+	]]
+	{
+		id = "aim",
+		label = "Аим на киллера (X)",
+		apply = function() end,
+	},
+	{
+		id = "autobrun",
+		label = "Авто-бег",
+		apply = function() end,
 	},
 }
 
@@ -4169,12 +4666,12 @@ local function refreshToggle(featureId)
 		return
 	end
 
-	-- Автоблок без VirtualInputManager нажать некому: тумблер гасим, чтобы
-	-- он не выглядел работающим.
-	if featureId == "autoblock" and (not autoblockInputAvailable or autoblockInputBlocked) then
+	-- Автоблок и авто-бег без VirtualInputManager нажать некому: тумблер
+	-- гасим, чтобы он не выглядел работающим.
+	if (featureId == "autoblock" or featureId == "autobrun") and (not autoblockInputAvailable or autoblockInputBlocked) then
 		button.BackgroundColor3 = COLORS.Off
 		button.TextColor3 = COLORS.Muted
-		button.Text = "Автоблок  [нет доступа к вводу]"
+		button.Text = FEATURE_BY_ID[featureId].label .. "  [нет доступа к вводу]"
 		return
 	end
 
@@ -4193,12 +4690,14 @@ local function setFeature(featureId, enabled)
 end
 
 local function toggleFeature(featureId)
-	-- Включать автоблок, когда нажатия отправлять нечем, бессмысленно:
-	-- тумблер бы горел ON, а блок не ставился.
-	if featureId == "autoblock" and not state.autoblock then
+	-- Включать автоблок и авто-бег, когда нажатия отправлять нечем,
+	-- бессмысленно: тумблер бы горел ON, а ничего не происходило.
+	if (featureId == "autoblock" or featureId == "autobrun") and not state[featureId] then
 		if not autoblockInputAvailable or autoblockInputBlocked then
-			refreshToggle("autoblock")
-			refreshAutoblockStatus()
+			refreshToggle(featureId)
+			if featureId == "autoblock" then
+				refreshAutoblockStatus()
+			end
 			return
 		end
 	end
@@ -4515,6 +5014,58 @@ makeNote(
 		.. "после патча плейса."
 )
 
+makeSection("АИМ")
+makeFeatureRow(FEATURE_BY_ID.aim)
+makeStepperRow("Скорость аима", ESP, "AimSpeed", 60, 60, 1440, function(value)
+	return value .. " град/с"
+end)
+makeNote(
+	"Камера постоянно доворачивается за ближайшим живым киллером "
+		.. "по горизонтали. Вертикаль остаётся под мышкой. В режиме паники "
+		.. "авто-бега (киллер ближе 25 м) стамина не опускается ниже "
+		.. "заданного пола (1-5)."
+)
+
+makeSection("БЕГ")
+makeFeatureRow(FEATURE_BY_ID.autobrun)
+makeOptionButton("Менеджмент стамины", RUN, "Managed")
+makeStepperRow("Порог стамины", RUN, "Low", 5, 5, 90, function(value)
+	return value .. "%"
+end)
+makeStepperRow("Запас возврата", RUN, "Resume", 5, 5, 40, function(value)
+	return "+" .. value
+end)
+makeStepperRow("Дистанция паники", RUN, "PanicDistance", 5, 10, 100, function(value)
+	return value .. " м"
+end)
+makeStepperRow("Пол стамины в панике", RUN, "PanicFloor", 1, 1, 5, function(value)
+	return value
+end)
+local runStatusLabel
+do
+	local label = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 34),
+		LayoutOrder = nextOrder(),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = "",
+		TextSize = 12,
+		TextColor3 = COLORS.Muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true,
+		Parent = body,
+	})
+	runStatusLabel = label
+end
+refreshRunStatus(runStatusLabel)
+makeNote(
+	"Менеджмент: стамина ниже порога - спринт отпускается, при "
+		.. "восстановлении зажимается снова. Киллер рядом (дистанция паники) - "
+		.. "лимиты игнорируются, но стамина не спускается ниже пола. "
+		.. "Клавиша справа - бинд спринта, переназначается."
+)
+
 makeSection("МЕНЮ")
 do
 	local row = new("Frame", {
@@ -4694,7 +5245,19 @@ makeNote(
 )
 
 --=========================== ВКЛАДКА КОНФИГА ===========================
+--[[
+	Целиком в do-блок ради лимита Luau на 200 локалов: после добавления
+	аима и авто-бега верхний уровень в упор (CompileError на
+	configStatusText - на СЛУЧАЙНОЙ функции, которой не хватило регистра,
+	а не на виновнике). Наружу выходит refreshConfigStatus: вкладка
+	самодостаточна, но её статус печатается при открытии меню ПОСЛЕ end
+	блока (вызов на стартовой вкладке ниже) - форвард-локал, определение
+	внутри БЕЗ local. markDirty/onConfigDirtyChanged - уже форвард-локалы
+	конфига (10_config).
+]]
+local refreshConfigStatus
 
+do
 setPage("config")
 makeSection("ПРОФИЛЬ")
 
@@ -4761,7 +5324,8 @@ end
 
 -- Статус пересчитывается при открытии меню: ошибка записи может появиться
 -- уже после запуска, и молча показывать старый текст нельзя.
-local function refreshConfigStatus()
+-- Без local: имя объявлено форвард-локалом выше (вызов после end блока).
+function refreshConfigStatus()
 	if configStatusLabel then
 		configStatusLabel.Text = configStatusText()
 		if writeFailed then
@@ -4996,6 +5560,7 @@ makeNote(
 		.. "Состояние читов не сохраняется намеренно - чит, включённый сам "
 		.. "при спавне, сразу заявляет о себе анти-читу."
 )
+end -- do-блок вкладки конфига (лимит 200 локалов)
 
 --=========================== СБРОС НАСТРОЕК ===========================
 
@@ -5047,6 +5612,14 @@ do
 		HITBOX.ShowHits = DEFAULTS.autoblockShowHits
 		STAMINA.NoFatigue = DEFAULTS.staminaNoFatigue
 		WARNING.Distance = DEFAULTS.warningDistance
+		-- DEFAULTS.esp.AimSpeed восстанавливается pairs-циклом выше
+		if type(DEFAULTS.run) == "table" and type(RUN) == "table" then
+			RUN.Managed = DEFAULTS.run.managed
+			RUN.Low = DEFAULTS.run.low
+			RUN.Resume = DEFAULTS.run.resume
+			RUN.PanicDistance = DEFAULTS.run.panicDistance
+			RUN.PanicFloor = DEFAULTS.run.panicFloor
+		end
 		updateZones()
 		-- Слушатель Fatigue зависит от NoFatigue, его надо переставить
 		if state.stamina then
@@ -5303,6 +5876,12 @@ local function getFlyDirection()
 end
 
 RunService.Stepped:Connect(function()
+	--[[
+		Авто-бег идёт ДО раннего выхода по персонажу: на смерти/респавне
+		персонажа нет, но зажатую клавишу надо отпустить, а не выйти с ней.
+	]]
+	autobrunStep()
+
 	if not (character and character.Parent and humanoid and rootPart) then
 		return
 	end
@@ -5393,6 +5972,10 @@ RunService.RenderStepped:Connect(function(deltaTime)
 		if main.Visible then
 			refreshAutoblockStatus()
 			refreshToggle("autoblock")
+			-- Статус авто-бега в темпе 4 Гц, рядом с автоблоковским
+			if runStatusLabel and runStatusLabel.Parent then
+				refreshRunStatus(runStatusLabel)
+			end
 		end
 	end
 
@@ -5676,4 +6259,34 @@ end)
 	   ScrollingFrame, поэтому позиция прокрутки в одной не сбивается при
 	   переходе в другую. Позиция самого окна между запусками не
 	   сохраняется - только настройки.
+
+	13. АИМ НА КИЛЛЕРА (40_auto). Камера доворачивается за ближайшим ЖИВЫМ
+	   киллером по горизонтали, вертикаль остаётся под мышкой (просьба
+	   пользователя). Направление считается ПО ОСЯМ КАМЕРЫ, а не по
+	   WorldToViewportPoint: проекция точки за камерой зеркалится (та же
+	   причина, по которой 360-указатели считают по проекциям направления).
+	   Знак поворота: CFrame.Angles(0, theta, 0), положительный theta =
+	   влево; atan2(crossY, dot) даёт именно его. BindToRenderStep на
+	   Camera.Value + 1 ОБЯЗАТЕЛЬНО: дефолтный контроллер пишет CFrame на
+	   Camera (200) и затёр бы запись из обычного RenderStepped.
+	   Unit нулевого вектора в Roblox НЕ бросает, а даёт NaN - поэтому
+	   Magnitude проверяется ДО нормировки, вырожденный кадр пропускается.
+	   Точка цели - aimPointOf (экспортирован из блока ESP форвард-локалом,
+	   тот же приём, что у teamNameOf). В бою НЕ ПРОВЕРЕНО.
+
+	14. АВТО-БЕГ И МЕНЕДЖМЕНТ СТАМИНЫ (40_auto). Скрипт сам зажимает
+	   клавишу спринта (BINDS.autobrun, по умолчанию LeftShift,
+	   переназначается). Менеджмент = пороги с гистерезисом: стамина
+	   <= Low (30) - отпускает, >= Low + Resume (15) - зажимает.
+	   ПАНИКА: киллер ближе PanicDistance (25 м) - порог игнорируется,
+	   становится PanicFloor (1-5): стамина не спускается до нуля
+	   (просьба пользователя). Клавиша - через VirtualInputManager, тем
+	   же паттерном, что автоблок (метка syntheticKey ДО отправки,
+	   отпускание с копией клавиши, состояние то же). Гейты: полёт ->
+	   НЕ трогать клавишу (LeftShift в полёте = ВНИЗ, FLY_KEYS), смерть/
+	   респавн -> отпустить, нет ввода -> тумблер серый. runDecision -
+	   чистая функция, тестируется вырезанием. Стамина читается через
+	   STAMINA_KEYS (StaminaServer первым). ЧТО НЕ ДЕЛАЕТ: скорость бега
+	   выше штатной (плейс режет спринт отдельными атрибутами - см.
+	   esp.txt «No Speed Debuffs», не сделано). В бою НЕ ПРОВЕРЕНО.
 ]]

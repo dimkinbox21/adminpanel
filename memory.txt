@@ -2296,3 +2296,176 @@ autoblockLastPress = 0, resolveBlock(). Способности выдаются 
   ЛЮБУЮ способность киллера в конусе, а не только на атакующую. По id
   анимации видно и тип атаки, и её тайминг (у спеца запас 570 мс вместо 280).
 - гейт по своему атрибуту Ragdolled: в рагдолле блок всё равно не встанет
+
+=========================== РАУНД 7: МОДУЛИ + АИМ + АВТО-БЕГ ===========================
+
+Просьба пользователя: авто-бег, авто-менеджмент стамины, постоянный аим
+на убийцу по оси X. Уточнения: спринт — зажатием; клавиша спринта —
+настраиваемая в меню; стамина = пороги + ПАНИКА («если убийца очень рядом
+можно забить лимиты, но не спускать стамину до нуля, а оставлять 1-5
+единиц»); аим — только горизонталь.
+Потом: «а что если разделить скрипт на модули — как тогда его запускать».
+Выбор пользователя: МОДУЛИ ЧЕРЕЗ LOADER (readfile/loadstring). Затем:
+«давай ещё в github добавим всё» — gh CLI установлен, логин пройден
+(dimkinbox21), репо dimkinbox21/adminpanel ПЕРЕИСПОЛЬЗОВАН (старую историю
+main заменили force-push'ом, ветка claude/aimbot-rear-panel не тронута).
+
+--------- СТРУКТУРА: МОДУЛИ + LOADER ---------
+
+Рабочая папка: "C:\Users\dimki\Documents\scripts — копия (2)" (кавычки
+обязательны, там em-dash). Теперь:
+  AdminMenuModules/            6 файлов-источников (ЕДИНСТВЕННЫЙ источник правды)
+    00_core.luau               шапка + все константы (BINDS 12 шт., ESP с AimSpeed,
+                               state с aim/autobrun)
+    10_config.luau             конфиг-блок; ПЛЮС форвард-локал RUN (см. ниже);
+                               стартовая загрузка ОТЛОЖЕНА task.defer
+    20_world.luau              state, читы, невидимость, ESP (aimPointOf
+                               ЭКСПОРТИРОВАН форвард-локалом), ИНТЕРФЕЙС,
+                               список игроков, стамина
+    30_combat.luau             баннер, updateList/applyList, автоблок
+    40_auto.luau               НОВЫЙ: аим + авто-бег/менеджмент стамины
+    50_ui.luau                 FEATURES (11 шт.), тумблеры/бинды, фабрики,
+                               сборка меню, вкладка конфига (в do-блоке!),
+                               сброс, bindCharacter, ввод, циклы, заметки 1-14
+  AdminMenuLoader.client.lua   загрузчик: readfile + table.concat + loadstring,
+                               всё-или-ничем (частичный чанк ломает перекрёстные
+                               ссылки). В Studio readfile нет — warn и выход.
+  build_menu.py                склейка модулей -> AdminMenu.client.lua (для Studio)
+  AdminMenu.client.lua         ПЕРЕГЕНЕРИРУЕТСЯ билдом. ПРАВКИ ВНОСИТЬ В МОДУЛИ!
+
+Порядок модулей в build_menu.py и AdminMenuLoader.client.lua ДОЛЖЕН
+СОВПАДАТЬ. Склейка байт-в-байт равна исходнику (md5-проверено при разрезе).
+Конфиг-блок state не читает (проверено grep'ом до разреза).
+
+--------- АИМ НА КИЛЛЕРА (40_auto) ---------
+
+ state.aim, бинд X (X свободен: SLOT_KEYS = Q/E/R/T/Y/U), тумблер «Аим на
+ киллера (X)» на вкладке «Читы» (секция АИМ), степпер «Скорость аима»
+ (ESP.AimSpeed = 480 град/с, 60-1440, шаг 60). apply no-op (как у warning):
+ выключение — перестаём писать CFrame, контроллер сам вернёт камеру.
+
+ ГЛАВНОЕ: BindToRenderStep("AdminMenuAim", Enum.RenderPriority.Camera.Value + 1, ...)
+ — дефолтный контроллер камеры пишет CFrame на Camera (200), запись из
+ обычного RenderStepped он затирал бы. pcall вокруг BindToRenderStep.
+ НЕ RenderStepped:Connect.
+ Знак поворота: deltaYaw = atan2(crossY, dot), crossY = L.Z*D.X - L.X*D.Z,
+ ПОЛОЖИТЕЛЬНЫЙ = ВЛЕВО (CFrame.Angles(0, theta, 0)). Проверено тестами:
+ A1 взгляд (0,0,-1), киллер +X -> -90 (вправо) — ГЛАВНЫЙ ТЕСТ;
+ A8 RightVector при Look=(-1,0,0) = (0,0,-1), т.е. «право» = -Z;
+ A9 RightVector при Look=(0,0,-1) = (1,0,0), т.е. «право» = +X.
+ Плоские векторы (Y=0), вертикаль остаётся под мышкой (просьба).
+ .Unit ТОЛЬКО после Magnitude >= 1e-3 (Unit нулевого вектора — NaN, не
+ ошибка). Кап шага maxStep = rad(AimSpeed) * dt. Малый deltaYaw (<1e-4) —
+ без записи. Аддитивный поворот CFrame.Angles(0, dy, 0) — pitch/roll
+ сохраняются.
+ Цель — aimPointOf (Torso/UpperTorso -> центр габаритов -> HRP -> любая
+ BasePart). Мёртвые киллеры отфильтрованы (Health <= 0). Манекен не игрок
+ (обход через Players + teamNameOf).
+ computeYawDelta — локальная функция внутри do-блока аима (наружу не
+ выходит). aimStep тоже локальная — её зовёт замыкание BindToRenderStep
+ внутри блока.
+ Конфиг: DEFAULTS.esp.AimSpeed (восстанавливается pairs-циклом applyDefaults),
+ клэм esp.aimSpeed в applyEspFromConfig (60-1440). В json: esp.aimSpeed.
+
+--------- АВТО-БЕГ / МЕНЕДЖМЕНТ СТАМИНЫ (40_auto) ---------
+
+ state.autobrun (тумблер «Авто-бег»), «Менеджмент стамины» — НЕ state, а
+ RUN.Managed через makeOptionButton (без своего бинда: makeBindButton читал
+ бы несуществующий BINDS["staminamgr"]).
+ RUN = { Managed=false, Low=30, Resume=15, PanicDistance=25, PanicFloor=3 }.
+ Форвард-локал RUN ОБЪЯВЛЕН В 10_config (не в 40_auto!): applyRunFromConfig
+ в замыкании task.defer должен захватить ТАБЛИЦУ по ссылке, а не глобал
+ (был реальный баг: объявление в 40_auto ПОЗЖЕ по файлу => замыкание конфига
+ видело глобал nil; luau-analyze поймал LocalShadow).
+ Меню: секция БЕГ на «Читах»: тумблер, опция менеджмента, 4 степпера
+ (Порог 5-90 шаг 5, Запас 5-40 шаг 5, Дистанция паники 10-100 шаг 5,
+ Пол 1-5 шаг 1), статус-строка runStatusLabel, makeNote.
+ Клавиша: BINDS.autobrun = LeftShift (переназначается, кнопка на тумблере).
+ КЛЮЧЕВОЙ ГЕЙТ: state.fly -> НЕ трогать клавишу (LeftShift в полёте = ВНИЗ,
+ FLY_KEYS) — зажатое отпускаем и выходим.
+ Гейты autobrunStep (вызывается ПЕРВЫМ делом в Stepped, до выхода по
+ персонажу — на смерти клавишу отпустить): оба тумблера выкл -> отпустить;
+ нет ввода -> выход (тумблер серый, как у автоблока: refreshToggle и
+ toggleFeature расширены на "autobrun"); fly -> отпустить, выход; нет
+ character/humanoid или Health <= 0 -> отпустить, выход; стамина через
+ readNumberAttribute(character, STAMINA_KEYS) — нет числа -> выход.
+ Порог: threshold = killerNear and RUN.PanicFloor or RUN.Low,
+ killerNear = nearestKillerDistance() <= RUN.PanicDistance (функция из
+ ЗОН АВТОБЛОКА, top-level, БЕЗ аргументов — принять как есть).
+ runDecision(stamina, threshold, resumeBand, held) -> "press"/"release"/nil:
+ стамина <= T и held -> "release"; стамина >= T + Resume и not held ->
+ "press"; иначе nil (гистерезисная полоса). ЧИСТАЯ функция, тестируется.
+ Без менеджмента (чистый авто-бег): клавиша держится ПОСТОЯННО, пороги
+ не работают (decision = not held and "press").
+ Зажатие: метка syntheticKey/syntheticUntil ДО отправки (тот же паттерн,
+ что pressBlockKey), SendKeyEvent(true, key, false, game); отпускание — с
+ меткой и копией клавиши (heldKey). Состояние: heldByScript, переходы
+ только по фронту. heldByScript/heldKey — ЛОКАЛЬНЫЕ внутри do-блока.
+ Конфиг: applyRunFromConfig (guard type(RUN) ~= "table" оставлен для
+ страховки; на практике загрузка отложена task.defer и RUN живой). Клэмы:
+ low 5-90, resume 5-40, panicDistance 10-100, panicFloor 1-5. В json:
+ "run": {managed, low, resume, panicDistance, panicFloor}. buildConfigTable
+ пишет runSection только при живом RUN. applyDefaults: 5 плоских
+ присваиваний RUN.* из DEFAULTS.run.
+ Стартовая загрузка конфига ОТЛОЖЕНА task.defer (была синхронной на ~1181):
+ RUN заполняется позже по файлу, синхронный вызов видел бы nil. Диагностика
+ файлового API печатается вместе с ней внутри task.defer.
+ Статус (refreshRunStatus(runStatusLabel), 4 Гц в RenderStepped при
+ открытом меню): «Стамина N% · спринт зажат скриптом [· ПАНИКА (киллер
+ ближе N м)]» / «отпущен (порог N)». Цвета COLORS.On/Muted/Danger.
+
+--------- ЛИМИТ 200 ЛОКАЛОВ (РАУНД 7 УПЁРСЯ СНОВА) ---------
+
+ После фич верхний уровень в упор: CompileError на configStatusText, потом
+ на flashToken — на СЛУЧАЙНЫХ функциях (п.28). Решения:
+  1. Вкладка конфига (50_ui) ЦЕЛИКОМ в do-блок; наружу refreshConfigStatus
+     (форвард-локал, определение БЕЗ local; вызов после end блока).
+  2. heldByScript/heldKey/aimStep/runDecision — внутри do-блоков 40_auto.
+  3. СПИСОК ИГРОКОВ НЕ УДАЛОСЬ завернуть: updateList/applyList (30_combat)
+     читают почти ВСЕ локалы секции (listRows, write*, teamRank/teamColor,
+     GUI-объекты listGui/listFrame/listTitleName/listTitleLegend, флаги
+     staminaKeyReported/staminaMissReported) — форвард-списка вышло бы
+     больше, чем экономия. ОСТАВЛЕНО top-level. Попытка оборачивания была,
+     развернута (LocalShadow 12 строк + лишний end).
+  4. RUN — форвард-локал В 10_config, не в 40_auto: замыкание task.defer
+     в конфиге захватывает таблицу по ссылке (LocalShadow ловит иначе).
+ Итог: 154/200 локалов (точный подсчёт построчным парсингом; grep "^local "
+ даёт 203 строки — не то, он не считает мульти-декларации и комментарии).
+ luau 0.736 СКАЧАН ЧЕРЕЗ NODE (https.get, luau-windows.zip с releases
+ luau-lang/luau) в %TEMP%\luau_dl — Invoke-WebRequest и curl на этой машине
+ по-прежнему падают. Распаковка: powershell Expand-Archive.
+ Компиляция: luau-compile.exe --null — ЧИСТАЯ (exit 0, 108 KB).
+ luau-analyze — 0 нешумовых строк (фильтр Unknown global/Unknown type).
+ em-dash в пути ломает cmd-редирект: файл КОПИРОВАТЬ в Temp и компилировать
+ там ("compile_target.lua"), или использовать powershell.
+ Вывод luau.exe перехватывается хуком (показывает только grep-совпадения,
+ формат "N matches in 1F") — полный вывод доставать через node spawn
+ (capture.js в папке теста пишет captured.txt) и читать python'ом.
+
+--------- ТЕСТЫ РАУНДА 7 ---------
+
+ Папка %TEMP%\dsh_auto: prelude.lua (Vector3-заглушка: __div/__sub/__add
+ В МЕТАТАБЛИЦЕ, __index-функция для Dot/Unit/Magnitude; _G в luau CLI
+ только для ЧТЕНИЯ — глобал без _G), tests.lua, build_test.js, capture.js.
+ build_test.js ВЫРЕЗАЕТ тела computeYawDelta (строки 67-90) и runDecision
+ (210-220) из живого 40_auto.luau по маркерам, оборачивает в do и делает
+ глобальными (replace '\tlocal function computeYawDelta' ->
+ '\tfunction computeYawDelta', '\tfunction runDecision' ->
+ '\trunDecision = function'). Копии формул не годятся.
+ Запуск: node build_test.js && node capture.js, чтение captured.txt python'ом.
+ 22 проверки, ВСЕ ПРОШЛИ: A1-A10 (computeYawDelta: знак, диагональ,
+ вырожденные, повернутая камера, Y игнорируется), B1-B12 (runDecision:
+ пороги, гистерезис, границы <=/>=, паника с полом).
+ ГРАБЛИ: A8/A9 изначально были ПРАВИЛЬНЫ в коде, а в ожиданиях НЕВЕРНЫ:
+ ждали +90/отрицательный по наитию, а векторная алгебра даёт -90/
+ положительный (RightVector считается как Look x Up). Тест был неправ,
+ не код. В БОЮ НЕ ПРОВЕРЕНО, как и раунды 4-6.
+
+--------- ЧТО ДАЛЬШЕ (не просили) ---------
+
+ - тесты менеджмента в harness'е с Roblox-заглушкой (потоки, атрибуты) —
+   текущие чистые тесты покрывают только решение, не отправку клавиш
+ - аим: вертикальный режим, прицел выстрелов через ремоуты (обсуждались,
+   пользователь выбрал горизонталь)
+ - в баннер о киллере: стрелка направления (обсуждалось, не просил)
+ - радар-миникарта (второй вариант 360, не выбран)
