@@ -189,7 +189,7 @@ RUN = {
 	Resume = 15, -- запас: зажимаем снова при >= Low + Resume
 	PanicDistance = 25, -- киллер ближе - режим паники
 	PanicFloor = 3, -- в панике порог = 1-5 (шаг степпера 1)
-	HoldKey = nil, -- клавиша спринта, берётся из BINDS.autobrun при каждом шаге
+	HoldKey = nil, -- не используется, клавиша берётся из BINDS.sprint при каждом шаге
 }
 
 do
@@ -301,19 +301,31 @@ do
 		threshold = RUN.PanicFloor
 	end
 
-	-- 7) Решение. При включённом только «Авто-бег» (без менеджмента)
-	--    пороги не работают: бегаем всегда, гейт только по состоянию.
+	-- 7) Решение.
+	--    БАГ (пользователь): менеджмент без авто-бега САМ ВКЛЮЧАЛ бег —
+	--    зажимал клавишу по порогам при выключенном тумблере. Теперь:
+	--    зажатие (press) ТОЛЬКО при включённом тумблере авто-бега;
+	--    менеджмент сам может только ОТПУСКАТЬ (бег останавливать),
+	--    включать его — не его дело.
 	local decision
 	if not RUN.Managed then
 		-- Чистый авто-бег: держим клавишу постоянно, пока тумблер включён
 		decision = not heldByScript and "press" or nil
 	else
-		decision = runDecision(stamina, threshold, RUN.Resume, heldByScript)
+		local rawDecision = runDecision(stamina, threshold, RUN.Resume, heldByScript)
+		if rawDecision == "press" and not state.autobrun then
+			-- Менеджмент просит зажать, но авто-бег выключен: НЕ включаем бег
+			decision = nil
+		else
+			decision = rawDecision
+		end
 	end
 
 	if decision == "press" then
 		heldByScript = true
-		heldKey = BINDS.autobrun
+		-- Клавиша спринта - BINDS.sprint (отдельный бинд, не тумблер):
+		-- BINDS.autobrun теперь включает/выключает сам тумблер
+		heldKey = BINDS.sprint
 		syntheticKey = heldKey
 		syntheticUntil = os.clock() + 0.1
 		local ok = pcall(function()

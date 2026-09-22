@@ -322,6 +322,7 @@ do
 		"warning",
 		"aim",
 		"autobrun",
+		"sprint",
 	}
 	BIND_IDS = BIND_IDS_LOCAL
 
