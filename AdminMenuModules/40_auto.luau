@@ -189,6 +189,9 @@ RUN = {
 	Resume = 15, -- запас: зажимаем снова при >= Low + Resume
 	PanicDistance = 25, -- киллер ближе - режим паники
 	PanicFloor = 3, -- в панике порог = 1-5 (шаг степпера 1)
+	StaminaEpsilon = 0.35, -- порог тренда стамины киллера: StaminaServer
+	-- репликуется рывками, любой кадр без обновления читался бы как «стоит»,
+	-- а следующий - как резкое падение (то же значение, что в баннере)
 	HoldKey = nil, -- не используется, клавиша берётся из BINDS.sprint при каждом шаге
 }
 
@@ -217,20 +220,102 @@ do
 		return nil
 	end
 
+	--[[
+		СТАМИНА КИЛЛЕРА (просьба пользователя: менеджмент должен знать о
+		его расходе и дальности). Тренд той же математики, что в баннере
+		о киллере (блок ПРЕДУПРЕЖДЕНИЕ): rate = (current - prev) / elapsed,
+		порог Epsilon гасит дрожь реплики. Свои ИСТОРИЯ и замер: баннер
+		ведёт историю в своём do-блоке, наружу не выходит.
+
+		Смысл: киллер рядом, но ВОССТАНАВЛИВАЕТ стамину - он не бежит,
+		и нам можно бежать на своих порогах, в панику проваливаться не надо.
+		Падает (тратит) - паника. Стоит на месте - паника (стоит = может
+		рвануть в любой момент; зелёным в баннере это не «безопасен»).
+
+		Возвращает "threat" (паника) / "resting" (киллер отдыхает - паника
+		НЕ нужна) / "unknown" (нет замера - консервативно паника).
+
+		kkiller - модель ближайшего киллера, distance - дистанция до него.
+	]]
+	local killerStaminaHistory = setmetatable({}, { __mode = "k" })
+
+	function killerThreat(killer, distance, elapsed, current)
+		if not (killer and current and elapsed and elapsed > 0) then
+			return "unknown"
+		end
+		local previous = killerStaminaHistory[killer]
+		local verdict
+		if previous then
+			local rate = (current - previous.value) / elapsed
+			if rate < -RUN.StaminaEpsilon then
+				verdict = "threat" -- тратит: бежит или атакует
+			elseif rate > RUN.StaminaEpsilon then
+				verdict = "resting" -- восстанавливается: не бежит
+			else
+				verdict = "threat" -- стоит на месте: может рвануть
+			end
+		else
+			verdict = "unknown" -- первый замер
+		end
+		killerStaminaHistory[killer] = { value = current, time = os.clock() }
+		return verdict
+	end
+
 	-- Ближайший живой киллер для паники. Своего цикла здесь НЕ надо:
 	-- nearestKillerDistance (секция ЗОНЫ АВТОБЛОКА) уже top-level и возвращает
-	-- число до ближайшего киллера. Мёртвые в нём не фильтруются, но для паники
-	-- это безопасно: мёртвый киллер не бьёт, а лишний спринт на труп - не беда.
-	local function killerIsNear()
+	-- число до ближайшего киллера. Модель для тренда стамины ищем отдельно:
+	-- nearestKillerDistance возвращает только число. Мёртвые в нём не
+	-- фильтруются, но для паники это безопасно: мёртвый киллер не бьёт.
+	local function killerIsNear(deltaTime)
 		if not rootPart then
 			return false
 		end
 		local distance = nearestKillerDistance()
-		return distance ~= nil and distance <= RUN.PanicDistance
+		if distance == nil or distance > RUN.PanicDistance then
+			return false
+		end
+
+		--[[
+			Киллер в радиусе паники. Если он ВОССТАНАВЛИВАЕТ стамину (не
+			тратит) - он не бежит, и паника не нужна: бежим на своих порогах
+			(просьба пользователя: «если он восстанавливает стамину и он не
+			близко то можно тоже восстановить» - строго: восстановление
+			киллера при НЕБЛИЗКОМ киллере и так означает обычные пороги;
+			здесь - восстановление при БЛИЗКОМ, оно тоже отменяет панику,
+			иначе рядом отдыхающий киллер держал бы нас в панике вечно).
+			Модель ближайшего киллера - тем же обходом, что и в
+			nearestKillerDistance (Players + teamNameOf).
+		]]
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other ~= player then
+				local char = other.Character
+				local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
+				if root and teamNameOf(other, char) == KILLER_TEAM then
+					local d = (root.Position - rootPart.Position).Magnitude
+					if d <= RUN.PanicDistance then
+						-- Ближайший киллер в радиусе; его стамина и её тренд
+						local humanoidOther = char:FindFirstChildOfClass("Humanoid")
+						if humanoidOther and humanoidOther.Health <= 0 then
+							return false -- мёртвый не угроза
+						end
+						local current = readNumberAttribute(char, STAMINA_KEYS)
+						local verdict = killerThreat(char, d, deltaTime, current)
+						if verdict == "resting" then
+							return false -- отдыхает: паника не нужна
+						end
+						return true -- threat или unknown: консервативно паника
+					end
+				end
+			end
+		end
+		return false
 	end
 
-	function autobrunStep()
+	-- deltaTime из Stepped-замыкания (50_ui): нужен тренду стамины киллера
+	function autobrunStep(deltaTime)
 	-- 1) Оба тумблера выключены -> отпустить, если зажато нами
+	--    (полное отключение; случай «только менеджмент вкл» закрыт гейтом 7
+	--    - там клавиша отпускается при выключенном авто-беге)
 	if not (state.autobrun or RUN.Managed) then
 		if heldByScript then
 			heldByScript = false
@@ -295,30 +380,45 @@ do
 		return
 	end
 
-	-- 6) Порог: паника игнорирует Low, но не спускает ниже PanicFloor
+	-- 6) Порог: паника игнорирует Low, но не спускает ниже PanicFloor.
+	--    killerIsNear теперь учитывает ТРЕНД стамины киллера: отдыхающий
+	--    рядом киллер паники не даёт (он не бежит).
 	local threshold = RUN.Low
-	if RUN.Managed and killerIsNear() then
+	if RUN.Managed and killerIsNear(deltaTime) then
 		threshold = RUN.PanicFloor
 	end
 
 	-- 7) Решение.
-	--    БАГ (пользователь): менеджмент без авто-бега САМ ВКЛЮЧАЛ бег —
-	--    зажимал клавишу по порогам при выключенном тумблере. Теперь:
-	--    зажатие (press) ТОЛЬКО при включённом тумблере авто-бега;
-	--    менеджмент сам может только ОТПУСКАТЬ (бег останавливать),
-	--    включать его — не его дело.
+	--    БАГ (пользователь, ВТОРАЯ жалоба): менеджмент при выключенном
+	--    авто-беге ПРОДОЛЖАЛ УПРАВЛЯТЬ уже зажатой клавишей - гейт 1)
+	--    срабатывает только когда выключены ОБА тумблера, и с включённым
+	--    менеджментом клавиша оставалась зажатой (гистерезис держал press
+	--    до восстановления стамины). Теперь: авто-бег выключен -> клавиша
+	--    ОТПУСКАЕТСЯ СРАЗУ, менеджмент клавишей не управляет вовсе.
+	--    Первая жалоба (сам включал бег) закрыта гейтом press.
 	local decision
+	if not state.autobrun then
+		-- Авто-бег выключен: менеджмент клавишей НЕ управляет. Зажатое
+		-- отпускаем сразу. Менеджмент работает ТОЛЬКО вместе с авто-бегом.
+		if heldByScript then
+			heldByScript = false
+			local releaseKey = heldKey
+			heldKey = nil
+			if releaseKey then
+				pcall(function()
+					syntheticKey = releaseKey
+					syntheticUntil = os.clock() + 0.1
+					VirtualInputManager:SendKeyEvent(false, releaseKey, false, game)
+				end)
+			end
+		end
+		return
+	end
 	if not RUN.Managed then
-		-- Чистый авто-бег: держим клавишу постоянно, пока тумблер включён
+		-- Чистый авто-бег: держим клавишу постоянно
 		decision = not heldByScript and "press" or nil
 	else
-		local rawDecision = runDecision(stamina, threshold, RUN.Resume, heldByScript)
-		if rawDecision == "press" and not state.autobrun then
-			-- Менеджмент просит зажать, но авто-бег выключен: НЕ включаем бег
-			decision = nil
-		else
-			decision = rawDecision
-		end
+		decision = runDecision(stamina, threshold, RUN.Resume, heldByScript)
 	end
 
 	if decision == "press" then
@@ -361,8 +461,14 @@ function refreshRunStatus(statusLabel)
 	if not statusLabel then
 		return
 	end
-	if not (state.autobrun or RUN.Managed) then
-		statusLabel.Text = "Авто-бег выключен."
+	if not state.autobrun then
+		-- Авто-бег выключен: менеджмент при нём не работает (закрытый баг).
+		-- Текст различает оба случая: только менеджмент и всё выключено.
+		if RUN.Managed then
+			statusLabel.Text = "Авто-бег выключен — менеджмент при нём не работает (включи авто-бег)."
+		else
+			statusLabel.Text = "Авто-бег выключен."
+		end
 		statusLabel.TextColor3 = COLORS.Muted
 		return
 	end
@@ -380,8 +486,10 @@ function refreshRunStatus(statusLabel)
 	local stamina = readNumberAttribute(character, STAMINA_KEYS)
 	local staminaText = stamina ~= nil and math.floor(stamina) .. "%" or "нет данных"
 
+	-- killerIsNear БЕЗ deltaTime: статус только показывает факт, тренд
+	-- считается в шаге (вызов с nil = первый замер, безопасно)
 	local killerText = ""
-	if RUN.Managed and killerIsNear() then
+	if RUN.Managed and killerIsNear(0) then
 		killerText = " · ПАНИКА (киллер ближе " .. RUN.PanicDistance .. " м)"
 	end
 

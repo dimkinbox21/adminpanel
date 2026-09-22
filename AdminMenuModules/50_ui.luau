@@ -1308,12 +1308,14 @@ local function getFlyDirection()
 	return direction
 end
 
-RunService.Stepped:Connect(function()
+RunService.Stepped:Connect(function(deltaTime)
 	--[[
 		Авто-бег идёт ДО раннего выхода по персонажу: на смерти/респавне
 		персонажа нет, но зажатую клавишу надо отпустить, а не выйти с ней.
+		deltaTime нужен killerIsNear: тренд стамины киллера считается по
+		времени между замерами.
 	]]
-	autobrunStep()
+	autobrunStep(deltaTime)
 
 	if not (character and character.Parent and humanoid and rootPart) then
 		return
