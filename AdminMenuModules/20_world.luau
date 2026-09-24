@@ -170,6 +170,10 @@ do
 	end
 
 	function applyInvisible(enabled)
+		-- Гейт игры: невидимость - DOD (анимация плейса), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 		if not enabled then
 			disconnectInvisible()
 			stopInvisibleAnimation()
@@ -1255,9 +1259,22 @@ end
 	локалы секции (listRows, write*, teamRank/teamColor, GUI-объекты,
 	флаги отчёта стамины), и вынесенного форвард-списка вышло бы больше,
 	чем экономия. Экономия локалов сделана в do-блоке ИНТЕРФЕЙСА ниже.
-]]
 
-local listGui = new("ScreenGui", {
+	ГЕЙТ ИГРЫ: список - DOD (команды плейса), вне DOD панель не строится.
+	Обёрнуто if'ом, а не удалено: код нужен в DOD.
+	Имена, нужные снаружи (30_combat: updateList/applyList; блок стамины;
+	40_auto), объявлены форвард-локалами ДО if - локалы if-блока наружу не
+	выходят (п.28). teamNameOf - уже форвард-локал ESP выше.
+]]
+local readNumberAttribute, updateSelfRole, selfIsKiller, maxStaminaOf
+local listGui, listFrame, listTitleName, listTitleLegend
+local listRows, acquireRow
+local writeTeamHeader, writePlayerRow, writeNoteRow
+local teamRank, teamColor, staminaTextOf
+selfIsKiller = false
+
+if isDodGame then
+listGui = new("ScreenGui", {
 	Name = "AdminPlayerList",
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
@@ -1266,7 +1283,7 @@ local listGui = new("ScreenGui", {
 	Parent = playerGui,
 })
 
-local listFrame = new("Frame", {
+listFrame = new("Frame", {
 	Name = "List",
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.new(1, -LIST.OffsetX, 0, LIST.OffsetY),
@@ -1294,7 +1311,7 @@ new("UIListLayout", {
 })
 
 -- Строка-заголовок панели. Не входит в пул: живёт всегда, LayoutOrder 0.
-local listTitleName = new("TextLabel", {
+listTitleName = new("TextLabel", {
 	Name = "Title",
 	Size = UDim2.new(1, -LIST.ValueWidth, 0, LIST.HeaderHeight),
 	LayoutOrder = 0,
@@ -1310,7 +1327,7 @@ local listTitleName = new("TextLabel", {
 -- Легенда парентится в сам заголовок, а не в панель: иначе UIListLayout
 -- увёл бы её на отдельную строку. Position 1,0 ставит её сразу за
 -- заголовком, ширина ValueWidth даёт правый край панели.
-local listTitleLegend = new("TextLabel", {
+listTitleLegend = new("TextLabel", {
 	Name = "Legend",
 	Size = UDim2.fromOffset(LIST.ValueWidth, LIST.HeaderHeight),
 	Position = UDim2.new(1, 0, 0, 0),
@@ -1325,9 +1342,9 @@ local listTitleLegend = new("TextLabel", {
 
 -- Пул строк. Игроки появляются и уходят каждый раунд, пересоздавать
 -- TextLabel'ы 10 раз в секунду - мусор для сборщика на ровном месте.
-local listRows = {}
+listRows = {}
 
-local function acquireRow(index)
+function acquireRow(index)
 	local row = listRows[index]
 	if not row then
 		local frame = new("Frame", {
@@ -1366,7 +1383,7 @@ local function acquireRow(index)
 	return row
 end
 
-local function writeTeamHeader(index, teamName, count, color)
+function writeTeamHeader(index, teamName, count, color)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.HeaderHeight)
 	row.name.Font = Enum.Font.GothamBold
@@ -1377,7 +1394,7 @@ local function writeTeamHeader(index, teamName, count, color)
 	row.value.Text = tostring(count)
 end
 
-local function writePlayerRow(index, text, value, color)
+function writePlayerRow(index, text, value, color)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.RowHeight)
 	row.name.Font = Enum.Font.Gotham
@@ -1388,7 +1405,7 @@ local function writePlayerRow(index, text, value, color)
 	row.value.Text = value
 end
 
-local function writeNoteRow(index, text)
+function writeNoteRow(index, text)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.RowHeight)
 	row.name.Font = Enum.Font.Gotham
@@ -1429,7 +1446,7 @@ function teamNameOf(other, char)
 	return NO_TEAM
 end
 
-local TEAM_RANK = {}
+TEAM_RANK = {}
 for index, name in ipairs(TEAM_ORDER) do
 	TEAM_RANK[name] = index
 end
@@ -1449,7 +1466,7 @@ end
 	(раунды меняются, и роль вместе с ними), а не запоминается один раз.
 ]]
 
-local function updateSelfRole()
+function updateSelfRole()
 	local wasKiller = selfIsKiller
 	if character and character.Parent then
 		selfIsKiller = teamNameOf(player, character) == KILLER_TEAM
@@ -1464,7 +1481,7 @@ local function updateSelfRole()
 	return selfIsKiller ~= wasKiller
 end
 
-local function teamRank(name)
+function teamRank(name)
 	if name == NO_TEAM then
 		return #TEAM_ORDER + 2 -- всегда последняя
 	end
@@ -1473,14 +1490,14 @@ end
 
 -- Локальная: снаружи do-блока ESP она не нужна - метки красятся своим
 -- colorForTeam по той же таблице TEAM_COLORS.
-local function teamColor(name)
+function teamColor(name)
 	return TEAM_COLORS[name] or COLORS.Text
 end
 
 -- Первое числовое значение из перечисленных атрибутов. GetAttribute на
 -- несуществующем имени возвращает nil, но под pcall на случай, если
 -- персонаж уже удаляется.
-local function readNumberAttribute(char, keys)
+function readNumberAttribute(char, keys)
 	for _, key in ipairs(keys) do
 		local ok, value = pcall(function()
 			return char:GetAttribute(key)
@@ -1506,7 +1523,7 @@ staminaMissReported = false
 	абсурдно большое: это признак включённой Infinite Stamina, и дробь
 	"73/inf" ничего не сообщает.
 ]]
-local function maxStaminaOf(char)
+function maxStaminaOf(char)
 	local fromAttribute = readNumberAttribute(char, MAX_STAMINA_KEYS)
 	if fromAttribute and fromAttribute > 0 and fromAttribute < math.huge then
 		return fromAttribute
@@ -1524,7 +1541,7 @@ local function maxStaminaOf(char)
 end
 
 -- Стамина в этом плейсе - атрибут персонажа, а не свойство Humanoid.
-local function staminaTextOf(char)
+function staminaTextOf(char)
 	if not char then
 		return nil, nil
 	end
@@ -1546,6 +1563,7 @@ local function staminaTextOf(char)
 	end
 	return string.format("%d/%d", math.floor(current + 0.5), math.floor(maxStamina + 0.5)), foundKey
 end
+end -- isDodGame (список игроков - DOD)
 
 --=========================== БЕСКОНЕЧНАЯ СТАМИНА ===========================
 
@@ -1589,6 +1607,10 @@ local function pushStamina()
 end
 
 local function applyStamina(enabled)
+	-- Гейт игры: стамина - DOD (атрибуты плейса), вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	disconnectStaminaWatch()
 
 	if not (character and character.Parent) then

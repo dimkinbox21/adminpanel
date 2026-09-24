@@ -90,7 +90,8 @@ do
 	end
 
 	function aimStep(deltaTime)
-		if not state.aim then
+		-- Гейт игры: аим - DOD (команда Killer), вне DOD пусто
+		if not isDodGame or not state.aim then
 			return
 		end
 		if not (rootPart and rootPart.Parent) then
@@ -313,6 +314,10 @@ do
 
 	-- deltaTime из Stepped-замыкания (50_ui): нужен тренду стамины киллера
 	function autobrunStep(deltaTime)
+		-- Гейт игры: авто-бег - DOD (клавиша спринта, команды Killer), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 	-- 1) Оба тумблера выключены -> отпустить, если зажато нами
 	--    (полное отключение; случай «только менеджмент вкл» закрыт гейтом 7
 	--    - там клавиша отпускается при выключенном авто-беге)

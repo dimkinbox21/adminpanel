@@ -2504,3 +2504,39 @@ luau-analyze поймал LocalShadow x5). Статус вызывает killerI
 все прошли. ГРАБЛИ: вырезка runDecision в build_test.js захватила хвост
 комментария (строки 210-212 были конец [[ ]], функция на 213-221) -
 SyntaxError; границы вырезки проверять на '--[['/']]'.
+
+--------- РАУНД 8: ГЕЙТ ИГРЫ (PlaceId) ---------
+
+Просьба: «добавь сначало проверку если не DOD то все функции для DOD
+удаляются ну и бинды к ним». Выбор границы (вопрос): вне DOD остаются
+Fly, Noclip, Godmode, ESP, меню, конфиг; удаляются список игроков,
+стамина, невидимость, автоблок, баннер, аим, авто-бег (+бинды).
+
+ГЕЙТ: isDodGame = game.PlaceId == 71895508397153 (из esp2.txt:5011).
+ОБЪЯВЛЕН ГЛОБАЛОМ (не local!): локалов верхнего уровня впритык - ровно
++1 локал от гейта выбил лимит (CompileError на flash в do конфиг-вкладки).
+Гейт в 10_config (перед do), не в 00_core: там же фильтр BIND_IDS.
+Бинды DOD удаляются присваиванием nil на месте (без таблицы DOD_BIND_IDS -
+тоже экономия регистров). Фильтр BIND_IDS_FULL -> BIND_IDS_LOCAL (только
+живые бинды): кнопки/конфиг/захват их не видят.
+
+ФУНКЦИОНАЛЬНЫЕ ГЕЙТЫ (isDodGame ПЕРВОЙ строкой): updateWarning, updateZones,
+autoblockStep, applyList, updateList, applyAutoblock (30_combat);
+applyStamina, applyInvisible (20_world); autobrunStep, aimStep (40_auto).
+UI: секции/вкладки DOD обёрнуты if isDodGame (50_ui): стамина, невидимость,
+АИМ+БЕГ (одним if), вкладки Игроки/Автоблок/Опасность (тремя). ESP
+остаётся всегда (метки вне DOD серые - TEAM_COLORS fallback уже учтён).
+
+ПОСЛЕДСТВИЯ ГЕЙТА ДЛЯ СПИСКА ИГРОКОВ: секция обёрнута if, её локалы
+стали локалами if-блока - наружу не выходят. ВСЕ имена, нужные 30_combat
+(13 шт.: listGui/listFrame/listTitleName/listTitleLegend/listRows/
+acquireRow/write*/TEAM_RANK/teamRank/teamColor/readNumberAttribute/
+maxStaminaOf/staminaTextOf), объявлены форвард-локалами ДО if,
+определения внутри БЕЗ local. selfIsKiller/staminaKeyReported/
+staminaMissReported - ГОБАЛЫ со времён раунда 7 (объявлений с local
+нет вообще - работают, но грязно; не трогать без задачи).
+runStatusLabel в 50_ui - тоже форвард-локал (секция БЕГ в if; циклы
+проверяют nil).
+luau-compile --null и luau-analyze чистые; 34 теста прошли. В бою вне
+DOD не проверено (там только fly/noclip/god/ESP - гейт должен честно
+warn'нуть и не показать DOD-вкладки).

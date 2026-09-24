@@ -110,6 +110,10 @@ do
 	end
 
 	function updateWarning(delta)
+		-- Гейт игры: баннер - DOD (StaminaServer/KillerName), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 		accumulator += delta
 		if accumulator < WARNING.Interval then
 			return
@@ -209,6 +213,10 @@ local function listLegendText()
 end
 
 local function updateList()
+	-- Гейт игры: список - DOD, вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	-- Дальность считается от своего персонажа. Если его нет (наблюдение,
 	-- смерть) - от камеры, иначе колонка молча схлопнулась бы в прочерки.
 	local origin = nil
@@ -347,6 +355,10 @@ local function updateList()
 end
 
 local function applyList(enabled)
+	-- Гейт игры: список - DOD (команды плейса), вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	listFrame.Visible = enabled
 	if enabled then
 		updateList() -- иначе панель до 0.1 с висит пустой
@@ -528,6 +540,10 @@ local function nearestKillerDistance()
 end
 
 local function updateZones()
+	-- Гейт игры: зоны - DOD, вне DOD пусто (вызовы из UI не сработают)
+	if not isDodGame then
+		return
+	end
 	-- selfIsKiller: у киллера автоблок отключён на раунд, зоны без него
 	-- показывали бы границу, которая ни на что не влияет
 	if not (AUTOBLOCK.ShowZone and state.autoblock) or selfIsKiller then
@@ -1186,6 +1202,10 @@ local function shouldBlockAttack(char, root, myPosition)
 end
 
 local function autoblockStep()
+	-- Гейт игры: автоблок - DOD, вне DOD никаких нажатий
+	if not isDodGame then
+		return
+	end
 	if not (character and character.Parent and rootPart) then
 		return
 	end
@@ -1275,6 +1295,10 @@ local function autoblockStep()
 end
 
 local function applyAutoblock(enabled)
+	-- Гейт игры: автоблок - DOD, вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	if not enabled then
 		destroyZones()
 		stopHitboxWatch()

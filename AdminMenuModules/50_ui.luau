@@ -1,5 +1,11 @@
 --=========================== ТУМБЛЕРЫ И БИНДЫ ===========================
 
+-- runStatusLabel - статус авто-бега на вкладке «Читы» (секция БЕГ).
+-- Форвард-локал: секция БЕГ обёрнута в if isDodGame (гейт игры), а
+-- refreshRunStatus вызывается из циклов снаружи - локал if-блока наружу
+-- не выходит (п.28). Вне DOD остаётся nil (циклы проверяют nil).
+local runStatusLabel
+
 local FEATURES = {
 	{ id = "fly", label = "Fly", apply = applyFly },
 	{ id = "noclip", label = "Noclip", apply = applyNoclip },
@@ -403,22 +409,30 @@ makeFeatureRow(FEATURE_BY_ID.noclip)
 makeSection("ВЫЖИВАЕМОСТЬ")
 makeFeatureRow(FEATURE_BY_ID.god)
 makeNote("Godmode локальный: урон от серверных скриптов он не остановит.")
-makeFeatureRow(FEATURE_BY_ID.stamina)
-makeOptionButton("Снимать усталость (Fatigue)", STAMINA, "NoFatigue")
-makeNote(
-	"Стамина работает по-настоящему: меняется предел MaxStamina, а считает "
-		.. "её клиентский код плейса. Скорость бега при этом не растёт."
-)
+-- Секция стамины - DOD (атрибуты MaxStamina/Fatigue плейса): вне DOD не строится
+if isDodGame then
+	makeFeatureRow(FEATURE_BY_ID.stamina)
+	makeOptionButton("Снимать усталость (Fatigue)", STAMINA, "NoFatigue")
+	makeNote(
+		"Стамина работает по-настоящему: меняется предел MaxStamina, а считает "
+			.. "её клиентский код плейса. Скорость бега при этом не растёт."
+	)
+end
 
-makeSection("НЕВИДИМОСТЬ")
-makeFeatureRow(FEATURE_BY_ID.invisible)
-makeNote(
-	"Приём с анимацией: персонаж уезжает из своей модели. Камера "
-		.. "переезжает на HumanoidRootPart, коллизии снимаются. "
-		.. "Зависит от анимационного ассета - может перестать работать "
-		.. "после патча плейса."
-)
+-- Секция невидимости - DOD (анимация плейса): вне DOD не строится
+if isDodGame then
+	makeSection("НЕВИДИМОСТЬ")
+	makeFeatureRow(FEATURE_BY_ID.invisible)
+	makeNote(
+		"Приём с анимацией: персонаж уезжает из своей модели. Камера "
+			.. "переезжает на HumanoidRootPart, коллизии снимаются. "
+			.. "Зависит от анимационного ассета - может перестать работать "
+			.. "после патча плейса."
+	)
+end
 
+-- Секции АИМ и БЕГ - DOD (команда Killer, клавиша спринта): вне DOD не строятся
+if isDodGame then
 makeSection("АИМ")
 makeFeatureRow(FEATURE_BY_ID.aim)
 makeStepperRow("Скорость аима", ESP, "AimSpeed", 60, 60, 1440, function(value)
@@ -472,23 +486,20 @@ end)
 makeStepperRow("Пол стамины в панике", RUN, "PanicFloor", 1, 1, 5, function(value)
 	return value
 end)
-local runStatusLabel
-do
-	local label = new("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 34),
-		LayoutOrder = nextOrder(),
-		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamMedium,
-		Text = "",
-		TextSize = 12,
-		TextColor3 = COLORS.Muted,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Top,
-		TextWrapped = true,
-		Parent = body,
-	})
-	runStatusLabel = label
-end
+runStatusLabel = new("TextLabel", {
+	Name = "RunStatus",
+	Size = UDim2.new(1, 0, 0, 34),
+	LayoutOrder = nextOrder(),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.GothamMedium,
+	Text = "",
+	TextSize = 12,
+	TextColor3 = COLORS.Muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+	TextWrapped = true,
+	Parent = body,
+})
 refreshRunStatus(runStatusLabel)
 makeNote(
 	"Авто-бег сам держит клавишу спринта (строка выше — её бинд; ручной "
@@ -498,6 +509,7 @@ makeNote(
 		.. "бег не включает. Киллер рядом (дистанция паники) — лимиты "
 		.. "игнорируются, но стамина не спускается ниже пола."
 )
+end -- isDodGame (секции АИМ/БЕГ - DOD)
 
 makeSection("МЕНЮ")
 do
@@ -563,6 +575,8 @@ makeNote(
 		.. "союзников» - иначе фильтр прятал бы ровно того, кого надо видеть."
 )
 
+-- Вкладка «Игроки» - DOD (команды плейса): вне DOD не строится
+if isDodGame then
 setPage("list")
 makeSection("СПИСОК ИГРОКОВ")
 makeFeatureRow(FEATURE_BY_ID.list)
@@ -574,7 +588,10 @@ makeNote(
 	"Стамина читается из атрибута StaminaServer - только его сервер "
 		.. "репликует про чужих игроков. Максимум берётся по виду киллера."
 )
+end -- isDodGame (список игроков - DOD)
 
+-- Вкладка «Автоблок» - DOD: вне DOD не строится
+if isDodGame then
 setPage("block")
 makeSection("АВТОБЛОК")
 makeFeatureRow(FEATURE_BY_ID.autoblock)
@@ -650,7 +667,10 @@ autoblockMetricsLabel = new("TextLabel", {
 	Parent = body,
 })
 refreshAutoblockStatus()
+end -- isDodGame (вкладка Автоблок - DOD)
 
+-- Вкладка «Опасность» - DOD: вне DOD не строится
+if isDodGame then
 setPage("warning")
 makeSection("ПРЕДУПРЕЖДЕНИЕ О КИЛЛЕРЕ")
 makeFeatureRow(FEATURE_BY_ID.warning)
@@ -676,6 +696,7 @@ makeNote(
 	"Если ты сам киллер в этом раунде, баннер и автоблок выключаются "
 		.. "автоматически - блока у киллера нет, а предупреждать его не о чем."
 )
+end -- isDodGame (вкладка Опасность - DOD)
 
 --=========================== ВКЛАДКА КОНФИГА ===========================
 --[[

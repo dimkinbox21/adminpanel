@@ -49,6 +49,44 @@ local onConfigDirtyChanged = nil -- ставится после сборки м�
 local DEFAULTS, BIND_IDS, keyCodeFromName
 local RUN -- заполняет 40_auto; applyRunFromConfig должен видеть таблицу по ссылке
 
+--============================ ГЕЙТ ИГРЫ ============================
+--[[
+	Проверка плейса. PlaceId из esp2.txt (строка 5011): 71895508397153 -
+	«Die of Death». Вне DOD функции, завязанные на внутренности плейса,
+	УДАЛЯЮТСЯ (просьба пользователя: «если не DOD то все функции для DOD
+	удаляются ну и бинды к ним») - бинды из BINDS, и фильтр BIND_IDS ниже
+	не пустит их в меню/конфиг/захват. Остаются Fly, Noclip, Godmode, ESP,
+	меню, конфиг.
+
+	Почему PlaceId, а не GameId: скрипт привязан к структуре конкретного
+	плейса (GameAssets.Teams, StaminaServer, KillerName). GameId шире -
+	он включил бы и сабплейсы, у которых структура может отличаться.
+
+	Гейт флагом, а не early return: сотни строк остального файла не
+	обёрнуты в условие. state-флаги DOD остаются, но функции выключены:
+	меню их тумблеров не показывает (бинды удалены), а step/apply-гейты
+	(40_auto, 30_combat) не дадут им работать.
+]]
+isDodGame = game.PlaceId == 71895508397153 -- глобал: локалов верхнего уровня впритык
+
+if not isDodGame then
+	BINDS.list = nil
+	BINDS.stamina = nil
+	BINDS.invisible = nil
+	BINDS.autoblock = nil
+	BINDS.warning = nil
+	BINDS.aim = nil
+	BINDS.autobrun = nil
+	BINDS.sprint = nil
+	warn(
+		"[AdminMenu] это НЕ Die of Death (PlaceId "
+			.. tostring(game.PlaceId)
+			.. "). Функции для DOD удалены: список игроков, стамина, невидимость, "
+			.. "автоблок, баннер, аим, авто-бег. Остались: Fly, Noclip, Godmode, ESP. "
+			.. "Бинды и настройки DOD в конфиг не пишутся."
+	)
+end
+
 do
 	local CONFIG_FOLDER = "AdminMenu"
 	local CONFIG_VERSION = 1
@@ -309,7 +347,13 @@ do
 		MarkCaretaker = "markCaretaker",
 	}
 
-	local BIND_IDS_LOCAL = {
+	--[[
+		Все 13 биндов. Вне DOD бинды DOD УДАЛЕНЫ из BINDS (гейт игры,
+		00_core), поэтому список фильтруется: в конфиг/меню/захват попадают
+		только те, у которых BINDS[bindId] ещё жив. isDodGame объявлен
+		ВЫШЕ (00_core) - флаг доступен отсюда.
+	]]
+	local BIND_IDS_FULL = {
 		"menu",
 		"fly",
 		"noclip",
@@ -324,6 +368,12 @@ do
 		"autobrun",
 		"sprint",
 	}
+	local BIND_IDS_LOCAL = {}
+	for _, bindId in ipairs(BIND_IDS_FULL) do
+		if BINDS[bindId] ~= nil then
+			table.insert(BIND_IDS_LOCAL, bindId)
+		end
+	end
 	BIND_IDS = BIND_IDS_LOCAL
 
 	-- LIST.MaxRows/Interval/Width/Offset* тоже остаются константами кода:

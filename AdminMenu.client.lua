@@ -478,6 +478,16 @@ local INVISIBLE = {
 	TimePosition = 2.2,
 }
 
+--============================ ГЕЙТ ИГРЫ ============================
+--[[
+	Проверка плейса - в начале 10_config (перед фильтром BIND_IDS): там же
+	удаляются бинды DOD. PlaceId из esp2.txt (строка 5011): 71895508397153.
+	Вне DOD функции, завязанные на внутренности плейса, удаляются вместе
+	с их биндами (просьба пользователя); остаются Fly, Noclip, Godmode,
+	ESP, меню, конфиг. Гейт флагом, а не early return: сотни строк
+	остального файла не обёрнуты в условие.
+]]
+
 --=========================== КОНФИГ: ДОСТУП К ФАЙЛАМ ===========================
 
 --[[
@@ -528,6 +538,44 @@ local configLoaded, configSource
 local onConfigDirtyChanged = nil -- ставится после сборки меню
 local DEFAULTS, BIND_IDS, keyCodeFromName
 local RUN -- заполняет 40_auto; applyRunFromConfig должен видеть таблицу по ссылке
+
+--============================ ГЕЙТ ИГРЫ ============================
+--[[
+	Проверка плейса. PlaceId из esp2.txt (строка 5011): 71895508397153 -
+	«Die of Death». Вне DOD функции, завязанные на внутренности плейса,
+	УДАЛЯЮТСЯ (просьба пользователя: «если не DOD то все функции для DOD
+	удаляются ну и бинды к ним») - бинды из BINDS, и фильтр BIND_IDS ниже
+	не пустит их в меню/конфиг/захват. Остаются Fly, Noclip, Godmode, ESP,
+	меню, конфиг.
+
+	Почему PlaceId, а не GameId: скрипт привязан к структуре конкретного
+	плейса (GameAssets.Teams, StaminaServer, KillerName). GameId шире -
+	он включил бы и сабплейсы, у которых структура может отличаться.
+
+	Гейт флагом, а не early return: сотни строк остального файла не
+	обёрнуты в условие. state-флаги DOD остаются, но функции выключены:
+	меню их тумблеров не показывает (бинды удалены), а step/apply-гейты
+	(40_auto, 30_combat) не дадут им работать.
+]]
+isDodGame = game.PlaceId == 71895508397153 -- глобал: локалов верхнего уровня впритык
+
+if not isDodGame then
+	BINDS.list = nil
+	BINDS.stamina = nil
+	BINDS.invisible = nil
+	BINDS.autoblock = nil
+	BINDS.warning = nil
+	BINDS.aim = nil
+	BINDS.autobrun = nil
+	BINDS.sprint = nil
+	warn(
+		"[AdminMenu] это НЕ Die of Death (PlaceId "
+			.. tostring(game.PlaceId)
+			.. "). Функции для DOD удалены: список игроков, стамина, невидимость, "
+			.. "автоблок, баннер, аим, авто-бег. Остались: Fly, Noclip, Godmode, ESP. "
+			.. "Бинды и настройки DOD в конфиг не пишутся."
+	)
+end
 
 do
 	local CONFIG_FOLDER = "AdminMenu"
@@ -789,7 +837,13 @@ do
 		MarkCaretaker = "markCaretaker",
 	}
 
-	local BIND_IDS_LOCAL = {
+	--[[
+		Все 13 биндов. Вне DOD бинды DOD УДАЛЕНЫ из BINDS (гейт игры,
+		00_core), поэтому список фильтруется: в конфиг/меню/захват попадают
+		только те, у которых BINDS[bindId] ещё жив. isDodGame объявлен
+		ВЫШЕ (00_core) - флаг доступен отсюда.
+	]]
+	local BIND_IDS_FULL = {
 		"menu",
 		"fly",
 		"noclip",
@@ -804,6 +858,12 @@ do
 		"autobrun",
 		"sprint",
 	}
+	local BIND_IDS_LOCAL = {}
+	for _, bindId in ipairs(BIND_IDS_FULL) do
+		if BINDS[bindId] ~= nil then
+			table.insert(BIND_IDS_LOCAL, bindId)
+		end
+	end
 	BIND_IDS = BIND_IDS_LOCAL
 
 	-- LIST.MaxRows/Interval/Width/Offset* тоже остаются константами кода:
@@ -1439,6 +1499,10 @@ do
 	end
 
 	function applyInvisible(enabled)
+		-- Гейт игры: невидимость - DOD (анимация плейса), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 		if not enabled then
 			disconnectInvisible()
 			stopInvisibleAnimation()
@@ -2524,9 +2588,22 @@ end
 	локалы секции (listRows, write*, teamRank/teamColor, GUI-объекты,
 	флаги отчёта стамины), и вынесенного форвард-списка вышло бы больше,
 	чем экономия. Экономия локалов сделана в do-блоке ИНТЕРФЕЙСА ниже.
-]]
 
-local listGui = new("ScreenGui", {
+	ГЕЙТ ИГРЫ: список - DOD (команды плейса), вне DOD панель не строится.
+	Обёрнуто if'ом, а не удалено: код нужен в DOD.
+	Имена, нужные снаружи (30_combat: updateList/applyList; блок стамины;
+	40_auto), объявлены форвард-локалами ДО if - локалы if-блока наружу не
+	выходят (п.28). teamNameOf - уже форвард-локал ESP выше.
+]]
+local readNumberAttribute, updateSelfRole, selfIsKiller, maxStaminaOf
+local listGui, listFrame, listTitleName, listTitleLegend
+local listRows, acquireRow
+local writeTeamHeader, writePlayerRow, writeNoteRow
+local teamRank, teamColor, staminaTextOf
+selfIsKiller = false
+
+if isDodGame then
+listGui = new("ScreenGui", {
 	Name = "AdminPlayerList",
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
@@ -2535,7 +2612,7 @@ local listGui = new("ScreenGui", {
 	Parent = playerGui,
 })
 
-local listFrame = new("Frame", {
+listFrame = new("Frame", {
 	Name = "List",
 	AnchorPoint = Vector2.new(1, 0),
 	Position = UDim2.new(1, -LIST.OffsetX, 0, LIST.OffsetY),
@@ -2563,7 +2640,7 @@ new("UIListLayout", {
 })
 
 -- Строка-заголовок панели. Не входит в пул: живёт всегда, LayoutOrder 0.
-local listTitleName = new("TextLabel", {
+listTitleName = new("TextLabel", {
 	Name = "Title",
 	Size = UDim2.new(1, -LIST.ValueWidth, 0, LIST.HeaderHeight),
 	LayoutOrder = 0,
@@ -2579,7 +2656,7 @@ local listTitleName = new("TextLabel", {
 -- Легенда парентится в сам заголовок, а не в панель: иначе UIListLayout
 -- увёл бы её на отдельную строку. Position 1,0 ставит её сразу за
 -- заголовком, ширина ValueWidth даёт правый край панели.
-local listTitleLegend = new("TextLabel", {
+listTitleLegend = new("TextLabel", {
 	Name = "Legend",
 	Size = UDim2.fromOffset(LIST.ValueWidth, LIST.HeaderHeight),
 	Position = UDim2.new(1, 0, 0, 0),
@@ -2594,9 +2671,9 @@ local listTitleLegend = new("TextLabel", {
 
 -- Пул строк. Игроки появляются и уходят каждый раунд, пересоздавать
 -- TextLabel'ы 10 раз в секунду - мусор для сборщика на ровном месте.
-local listRows = {}
+listRows = {}
 
-local function acquireRow(index)
+function acquireRow(index)
 	local row = listRows[index]
 	if not row then
 		local frame = new("Frame", {
@@ -2635,7 +2712,7 @@ local function acquireRow(index)
 	return row
 end
 
-local function writeTeamHeader(index, teamName, count, color)
+function writeTeamHeader(index, teamName, count, color)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.HeaderHeight)
 	row.name.Font = Enum.Font.GothamBold
@@ -2646,7 +2723,7 @@ local function writeTeamHeader(index, teamName, count, color)
 	row.value.Text = tostring(count)
 end
 
-local function writePlayerRow(index, text, value, color)
+function writePlayerRow(index, text, value, color)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.RowHeight)
 	row.name.Font = Enum.Font.Gotham
@@ -2657,7 +2734,7 @@ local function writePlayerRow(index, text, value, color)
 	row.value.Text = value
 end
 
-local function writeNoteRow(index, text)
+function writeNoteRow(index, text)
 	local row = acquireRow(index)
 	row.frame.Size = UDim2.new(1, 0, 0, LIST.RowHeight)
 	row.name.Font = Enum.Font.Gotham
@@ -2698,7 +2775,7 @@ function teamNameOf(other, char)
 	return NO_TEAM
 end
 
-local TEAM_RANK = {}
+TEAM_RANK = {}
 for index, name in ipairs(TEAM_ORDER) do
 	TEAM_RANK[name] = index
 end
@@ -2718,7 +2795,7 @@ end
 	(раунды меняются, и роль вместе с ними), а не запоминается один раз.
 ]]
 
-local function updateSelfRole()
+function updateSelfRole()
 	local wasKiller = selfIsKiller
 	if character and character.Parent then
 		selfIsKiller = teamNameOf(player, character) == KILLER_TEAM
@@ -2733,7 +2810,7 @@ local function updateSelfRole()
 	return selfIsKiller ~= wasKiller
 end
 
-local function teamRank(name)
+function teamRank(name)
 	if name == NO_TEAM then
 		return #TEAM_ORDER + 2 -- всегда последняя
 	end
@@ -2742,14 +2819,14 @@ end
 
 -- Локальная: снаружи do-блока ESP она не нужна - метки красятся своим
 -- colorForTeam по той же таблице TEAM_COLORS.
-local function teamColor(name)
+function teamColor(name)
 	return TEAM_COLORS[name] or COLORS.Text
 end
 
 -- Первое числовое значение из перечисленных атрибутов. GetAttribute на
 -- несуществующем имени возвращает nil, но под pcall на случай, если
 -- персонаж уже удаляется.
-local function readNumberAttribute(char, keys)
+function readNumberAttribute(char, keys)
 	for _, key in ipairs(keys) do
 		local ok, value = pcall(function()
 			return char:GetAttribute(key)
@@ -2775,7 +2852,7 @@ staminaMissReported = false
 	абсурдно большое: это признак включённой Infinite Stamina, и дробь
 	"73/inf" ничего не сообщает.
 ]]
-local function maxStaminaOf(char)
+function maxStaminaOf(char)
 	local fromAttribute = readNumberAttribute(char, MAX_STAMINA_KEYS)
 	if fromAttribute and fromAttribute > 0 and fromAttribute < math.huge then
 		return fromAttribute
@@ -2793,7 +2870,7 @@ local function maxStaminaOf(char)
 end
 
 -- Стамина в этом плейсе - атрибут персонажа, а не свойство Humanoid.
-local function staminaTextOf(char)
+function staminaTextOf(char)
 	if not char then
 		return nil, nil
 	end
@@ -2815,6 +2892,7 @@ local function staminaTextOf(char)
 	end
 	return string.format("%d/%d", math.floor(current + 0.5), math.floor(maxStamina + 0.5)), foundKey
 end
+end -- isDodGame (список игроков - DOD)
 
 --=========================== БЕСКОНЕЧНАЯ СТАМИНА ===========================
 
@@ -2858,6 +2936,10 @@ local function pushStamina()
 end
 
 local function applyStamina(enabled)
+	-- Гейт игры: стамина - DOD (атрибуты плейса), вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	disconnectStaminaWatch()
 
 	if not (character and character.Parent) then
@@ -3024,6 +3106,10 @@ do
 	end
 
 	function updateWarning(delta)
+		-- Гейт игры: баннер - DOD (StaminaServer/KillerName), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 		accumulator += delta
 		if accumulator < WARNING.Interval then
 			return
@@ -3123,6 +3209,10 @@ local function listLegendText()
 end
 
 local function updateList()
+	-- Гейт игры: список - DOD, вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	-- Дальность считается от своего персонажа. Если его нет (наблюдение,
 	-- смерть) - от камеры, иначе колонка молча схлопнулась бы в прочерки.
 	local origin = nil
@@ -3261,6 +3351,10 @@ local function updateList()
 end
 
 local function applyList(enabled)
+	-- Гейт игры: список - DOD (команды плейса), вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	listFrame.Visible = enabled
 	if enabled then
 		updateList() -- иначе панель до 0.1 с висит пустой
@@ -3442,6 +3536,10 @@ local function nearestKillerDistance()
 end
 
 local function updateZones()
+	-- Гейт игры: зоны - DOD, вне DOD пусто (вызовы из UI не сработают)
+	if not isDodGame then
+		return
+	end
 	-- selfIsKiller: у киллера автоблок отключён на раунд, зоны без него
 	-- показывали бы границу, которая ни на что не влияет
 	if not (AUTOBLOCK.ShowZone and state.autoblock) or selfIsKiller then
@@ -4100,6 +4198,10 @@ local function shouldBlockAttack(char, root, myPosition)
 end
 
 local function autoblockStep()
+	-- Гейт игры: автоблок - DOD, вне DOD никаких нажатий
+	if not isDodGame then
+		return
+	end
 	if not (character and character.Parent and rootPart) then
 		return
 	end
@@ -4189,6 +4291,10 @@ local function autoblockStep()
 end
 
 local function applyAutoblock(enabled)
+	-- Гейт игры: автоблок - DOD, вне DOD пусто
+	if not isDodGame then
+		return
+	end
 	if not enabled then
 		destroyZones()
 		stopHitboxWatch()
@@ -4306,7 +4412,8 @@ do
 	end
 
 	function aimStep(deltaTime)
-		if not state.aim then
+		-- Гейт игры: аим - DOD (команда Killer), вне DOD пусто
+		if not isDodGame or not state.aim then
 			return
 		end
 		if not (rootPart and rootPart.Parent) then
@@ -4529,6 +4636,10 @@ do
 
 	-- deltaTime из Stepped-замыкания (50_ui): нужен тренду стамины киллера
 	function autobrunStep(deltaTime)
+		-- Гейт игры: авто-бег - DOD (клавиша спринта, команды Killer), вне DOD пусто
+		if not isDodGame then
+			return
+		end
 	-- 1) Оба тумблера выключены -> отпустить, если зажато нами
 	--    (полное отключение; случай «только менеджмент вкл» закрыт гейтом 7
 	--    - там клавиша отпускается при выключенном авто-беге)
@@ -4719,6 +4830,12 @@ function refreshRunStatus(statusLabel)
 end
 end -- do-блок авто-бега (лимит 200 локалов)
 --=========================== ТУМБЛЕРЫ И БИНДЫ ===========================
+
+-- runStatusLabel - статус авто-бега на вкладке «Читы» (секция БЕГ).
+-- Форвард-локал: секция БЕГ обёрнута в if isDodGame (гейт игры), а
+-- refreshRunStatus вызывается из циклов снаружи - локал if-блока наружу
+-- не выходит (п.28). Вне DOD остаётся nil (циклы проверяют nil).
+local runStatusLabel
 
 local FEATURES = {
 	{ id = "fly", label = "Fly", apply = applyFly },
@@ -5123,22 +5240,30 @@ makeFeatureRow(FEATURE_BY_ID.noclip)
 makeSection("ВЫЖИВАЕМОСТЬ")
 makeFeatureRow(FEATURE_BY_ID.god)
 makeNote("Godmode локальный: урон от серверных скриптов он не остановит.")
-makeFeatureRow(FEATURE_BY_ID.stamina)
-makeOptionButton("Снимать усталость (Fatigue)", STAMINA, "NoFatigue")
-makeNote(
-	"Стамина работает по-настоящему: меняется предел MaxStamina, а считает "
-		.. "её клиентский код плейса. Скорость бега при этом не растёт."
-)
+-- Секция стамины - DOD (атрибуты MaxStamina/Fatigue плейса): вне DOD не строится
+if isDodGame then
+	makeFeatureRow(FEATURE_BY_ID.stamina)
+	makeOptionButton("Снимать усталость (Fatigue)", STAMINA, "NoFatigue")
+	makeNote(
+		"Стамина работает по-настоящему: меняется предел MaxStamina, а считает "
+			.. "её клиентский код плейса. Скорость бега при этом не растёт."
+	)
+end
 
-makeSection("НЕВИДИМОСТЬ")
-makeFeatureRow(FEATURE_BY_ID.invisible)
-makeNote(
-	"Приём с анимацией: персонаж уезжает из своей модели. Камера "
-		.. "переезжает на HumanoidRootPart, коллизии снимаются. "
-		.. "Зависит от анимационного ассета - может перестать работать "
-		.. "после патча плейса."
-)
+-- Секция невидимости - DOD (анимация плейса): вне DOD не строится
+if isDodGame then
+	makeSection("НЕВИДИМОСТЬ")
+	makeFeatureRow(FEATURE_BY_ID.invisible)
+	makeNote(
+		"Приём с анимацией: персонаж уезжает из своей модели. Камера "
+			.. "переезжает на HumanoidRootPart, коллизии снимаются. "
+			.. "Зависит от анимационного ассета - может перестать работать "
+			.. "после патча плейса."
+	)
+end
 
+-- Секции АИМ и БЕГ - DOD (команда Killer, клавиша спринта): вне DOD не строятся
+if isDodGame then
 makeSection("АИМ")
 makeFeatureRow(FEATURE_BY_ID.aim)
 makeStepperRow("Скорость аима", ESP, "AimSpeed", 60, 60, 1440, function(value)
@@ -5192,23 +5317,20 @@ end)
 makeStepperRow("Пол стамины в панике", RUN, "PanicFloor", 1, 1, 5, function(value)
 	return value
 end)
-local runStatusLabel
-do
-	local label = new("TextLabel", {
-		Size = UDim2.new(1, 0, 0, 34),
-		LayoutOrder = nextOrder(),
-		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamMedium,
-		Text = "",
-		TextSize = 12,
-		TextColor3 = COLORS.Muted,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextYAlignment = Enum.TextYAlignment.Top,
-		TextWrapped = true,
-		Parent = body,
-	})
-	runStatusLabel = label
-end
+runStatusLabel = new("TextLabel", {
+	Name = "RunStatus",
+	Size = UDim2.new(1, 0, 0, 34),
+	LayoutOrder = nextOrder(),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.GothamMedium,
+	Text = "",
+	TextSize = 12,
+	TextColor3 = COLORS.Muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	TextYAlignment = Enum.TextYAlignment.Top,
+	TextWrapped = true,
+	Parent = body,
+})
 refreshRunStatus(runStatusLabel)
 makeNote(
 	"Авто-бег сам держит клавишу спринта (строка выше — её бинд; ручной "
@@ -5218,6 +5340,7 @@ makeNote(
 		.. "бег не включает. Киллер рядом (дистанция паники) — лимиты "
 		.. "игнорируются, но стамина не спускается ниже пола."
 )
+end -- isDodGame (секции АИМ/БЕГ - DOD)
 
 makeSection("МЕНЮ")
 do
@@ -5283,6 +5406,8 @@ makeNote(
 		.. "союзников» - иначе фильтр прятал бы ровно того, кого надо видеть."
 )
 
+-- Вкладка «Игроки» - DOD (команды плейса): вне DOD не строится
+if isDodGame then
 setPage("list")
 makeSection("СПИСОК ИГРОКОВ")
 makeFeatureRow(FEATURE_BY_ID.list)
@@ -5294,7 +5419,10 @@ makeNote(
 	"Стамина читается из атрибута StaminaServer - только его сервер "
 		.. "репликует про чужих игроков. Максимум берётся по виду киллера."
 )
+end -- isDodGame (список игроков - DOD)
 
+-- Вкладка «Автоблок» - DOD: вне DOD не строится
+if isDodGame then
 setPage("block")
 makeSection("АВТОБЛОК")
 makeFeatureRow(FEATURE_BY_ID.autoblock)
@@ -5370,7 +5498,10 @@ autoblockMetricsLabel = new("TextLabel", {
 	Parent = body,
 })
 refreshAutoblockStatus()
+end -- isDodGame (вкладка Автоблок - DOD)
 
+-- Вкладка «Опасность» - DOD: вне DOD не строится
+if isDodGame then
 setPage("warning")
 makeSection("ПРЕДУПРЕЖДЕНИЕ О КИЛЛЕРЕ")
 makeFeatureRow(FEATURE_BY_ID.warning)
@@ -5396,6 +5527,7 @@ makeNote(
 	"Если ты сам киллер в этом раунде, баннер и автоблок выключаются "
 		.. "автоматически - блока у киллера нет, а предупреждать его не о чем."
 )
+end -- isDodGame (вкладка Опасность - DOD)
 
 --=========================== ВКЛАДКА КОНФИГА ===========================
 --[[
