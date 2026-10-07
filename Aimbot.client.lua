@@ -1,5 +1,5 @@
 --[[
-	АИМБОТ НА ИГРОКОВ И NPC (LocalScript)
+	АИМБОТ НА ИГРРОКОВ И NPC + ТРИГГЕР-БОТ (LocalScript)
 
 	Куда положить: StarterPlayer -> StarterPlayerScripts, тип объекта LocalScript.
 	Запуск через executor - то же самое: вставить содержимое файла и выполнить.
@@ -10,28 +10,32 @@
 	  - аим на игроков И NPC: цель - любой персонаж с Humanoid и
 	    HumanoidRootPart, неважно игрок это или модель с сервера;
 	  - КРУГ ЗАХВАТА (FOV): цель берётся только внутри круга в центре экрана,
-	    радиус правится в меню и биндами -/+, радиус 0 = вся плоскость экрана;
-	  - ВЫБОР ЦЕЛИ: БЛИЖАЙШАЯ К ПРИЦЕЛУ (угол между камерой и направлением
-	    на цель, не дистанция) - стреляешь мимо одного, аим не перетягивает;
+	    радиус правится в меню, радиус 0 = вся плоскость экрана;
+	  - ВЫБОР ЦЕЛИ: БЛИЖАЙШАЯ К ПРИЦЕЛУ (экранное расстояние до центра,
+	    не угол и не дистанция) - стреляешь мимо одного, аим не перетягивает;
 	  - ПЛАВНОСТЬ (smoothness): камера доворачивается на часть угла за кадр;
 	    1 = мгновенно, больше = мягче, регулируется;
-	  - упреждение не сделано (нет модели скорости цели - по просьбе
-	    «просто продвинутый аимбот» этого достаточно, см. ЗАМЕТКИ в конце);
 	  - проверка стен (WallCheck): через raycast - цель за стеной не берётся,
 	    тумблер, по умолчанию ВКЛ;
 	  - проверка команды: в играх со штатными Team - союзников не берёт
 	    (Player.Team). В плейсах без Team все считаются врагами;
 	  - живые цели: Humanoid.Health > 0, мёртвых не берёт;
 	  - графический круг FOV в центре экрана (включается с аимботом);
-	  - БИНД: правая кнопка мыши по умолчанию (держишь - аим работает,
-	    отпустил - выключился), переназначается на любую клавишу/кнопку
-	    мыши в меню;
+	  - ТРИГГЕР-БОТ: автовыстрел, когда прицел на цели. Райкаст из центра
+	    экрана (WallCheck сам собой), тумблер в меню + бинд T (переключатель),
+	    задержка перед выстрелом и кулдаун между выстрелами правятся.
+	    Нужен executor (VirtualInputManager), без него тумблер не включается;
+	  - БИНДЫ В TOGGLE (просьба пользователя: «переведи все кнопки в toggle»):
+	    нажал - включилось, нажал ещё раз - выключилось. Режим бинда аима
+	    правится тумблером «Бинд аима: toggle» (false = старое удержание);
 	  - меню простое: экран-панель с тумблерами и степперами (Rayfield
 	    не тащится - скрипт самодостаточный, как AdminMenu).
 
-	Клавиши по умолчанию: RightMouse - аим (удержание), RightCtrl - меню.
-	В меню: тумблер аима, WallCheck, TeamCheck, степперы FOV (0-500, шаг 10),
-	Плавность (1-20, шаг 1), бинды.
+	Клавиши по умолчанию: RightMouse - аим (toggle), T - триггер-бот (toggle),
+	RightCtrl - меню.
+	В меню: Аимбот, Бинд аима: toggle, WallCheck, TeamCheck, Триггер-бот,
+	степперы FOV (0-500, шаг 10), Плавность (1-20), Дистанция (0-5000),
+	Задержка выстрела (0-1 с), Пауза между выстрелами (0.05-2 с), бинды.
 
 	Работает только на клиенте: аим крутит КАМЕРУ, а не выстрелы - сервер
 	видит обычный ввод мыши. Это мягче хуков на ремоуты и не ловится
@@ -50,8 +54,11 @@ local player = Players.LocalPlayer
 
 local SETTINGS = {
 	Enabled = false, -- аим работает (бинд или тумблер)
+	ToggleAim = true, -- бинд аима ПЕРЕКЛЮЧАТЕЛЬ, а не удержание (просьба
+	-- пользователя: «переведи все кнопки в toggle»); false = удержание
 	WallCheck = true, -- цели за стеной не брать
 	TeamCheck = true, -- союзников (штатные Team) не брать
+	TriggerBot = false, -- автовыстрел, когда прицел на цели внутри круга
 	Fov = 120, -- радиус круга захвата, px (0 = весь экран)
 	FovStep = 10,
 	FovMin = 0,
@@ -60,11 +67,14 @@ local SETTINGS = {
 	SmoothMin = 1,
 	SmoothMax = 20,
 	MaxDistance = 2000, -- дальше этого цели не берутся, 0 = без лимита
+	TriggerDelay = 0.1, -- задержка перед выстрелом, с (0 = сразу)
+	TriggerCooldown = 0.15, -- пауза между выстрелами, с
 }
 
 local BINDS = {
 	menu = Enum.KeyCode.RightControl,
-	aim = Enum.UserInputType.MouseButton2, -- удержание
+	aim = Enum.UserInputType.MouseButton2, -- переключатель (ToggleAim) или удержание
+	trigger = Enum.KeyCode.T, -- тумблер триггер-бота
 }
 
 -- Цвет круга FOV и видимость панели
@@ -405,8 +415,13 @@ end)
 
 --=========================== БИНД АИМА ============================
 
--- Удержание: бинды бывают клавишами и кнопками мыши. aimHeld объявлён
--- выше (в СОСТОЯНИИ) - aimStep читает его замыканием.
+--[[
+	TOGGLE по умолчанию (просьба пользователя: «переведи все кнопки
+	в toggle»): нажал бинд - аим включился, нажал ещё раз - выключился.
+	SETTINGS.ToggleAim = false возвращает удержание (зажал - работает,
+	отпустил - нет). Бинды бывают клавишами и кнопками мыши. aimHeld
+	объявлён выше (в СОСТОЯНИИ) - aimStep читает его замыканием.
+]]
 
 local function isAimInput(input)
 	local keyCode = input.KeyCode
@@ -426,12 +441,19 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		return
 	end
 	if isAimInput(input) then
-		aimHeld = true
+		if SETTINGS.ToggleAim then
+			-- Переключатель: каждое нажатие меняет состояние
+			aimHeld = not aimHeld
+		else
+			-- Удержание
+			aimHeld = true
+		end
 	end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-	if isAimInput(input) then
+	-- В toggle-режиме отпускание НЕ выключает: выключает следующее нажатие
+	if not SETTINGS.ToggleAim and isAimInput(input) then
 		aimHeld = false
 	end
 end)
@@ -754,13 +776,25 @@ end
 --=========================== СБОРКА МЕНЮ ============================
 
 makeToggle("Аимбот", "Enabled")
+makeToggle("Бинд аима: toggle", "ToggleAim")
 makeToggle("Проверка стен", "WallCheck")
 makeToggle("Проверка команды", "TeamCheck")
+makeToggle("Триггер-бот", "TriggerBot")
 makeStepper("Круг захвата", "Fov", SETTINGS.FovStep, SETTINGS.FovMin, SETTINGS.FovMax, "px")
 makeStepper("Плавность", "Smoothness", 1, SETTINGS.SmoothMin, SETTINGS.SmoothMax, "")
 makeStepper("Дистанция", "MaxDistance", 250, 0, 5000, "m")
-makeBindRow("Аим (удержание)", "aim")
+makeStepper("Задержка выстрела", "TriggerDelay", 0.05, 0, 1, "с")
+makeStepper("Пауза между выстрелами", "TriggerCooldown", 0.05, 0.05, 2, "с")
+makeBindRow("Аим (toggle)", "aim")
+makeBindRow("Триггер-бот (toggle)", "trigger")
 makeBindRow("Меню", "menu")
+
+--[[
+	Триггер-бот: тумблер в меню (TriggerBot) и бинд T (переключатель) -
+	два независимых состояния, работает ЛИБО то, ЛИБО другое включено.
+	Тумблер «Бинд аима: toggle» выше - РЕЖИМ бинда аима: true = переключатель,
+	false = удержание. Сам бинд переносится строкой «Аим (toggle)».
+]]
 
 -- Клавиша меню: RightCtrl по умолчанию, переназначается
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -809,6 +843,153 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
+--=========================== ТРИГГЕР-БОТ ===========================
+--[[
+	АВТОВЫСТРЕЛ, когда прицел на цели внутри круга (просьба пользователя).
+	Клик отправляется VirtualInputManager - тем же способом, что нажатия
+	AdminMenu: метка до отправки, отпускание через task.delay.
+	Работает ТОЛЬКО при включённом триггер-боте (тумблер или бинд T);
+	аимбот может быть выключен - триггер сам по себе полезен.
+
+	Проверка «под прицелом»: РАЙКАСТ из центра экрана (не круг: круг для
+	ЗАХВАТА аимбота, выстрел по краю круга промахивается). Луч упёрся в
+	модель с живым Humanoid, которая враг (TeamCheck) - цель под прицелом.
+	WallCheck получается сам собой: луч и есть проверка стен.
+
+	Задержка TriggerDelay (0.1 с по умолчанию) перед выстрелом: мгновенный
+	выстрел на пролетающей цели тратится впустую. Кулдаун TriggerCooldown
+	между выстрелами (0.15 с): не спамить по одной цели.
+]]
+
+local VirtualInputManager = nil
+do
+	local ok, service = pcall(function()
+		return game:GetService("VirtualInputManager")
+	end)
+	if ok then
+		VirtualInputManager = service
+	end
+end
+
+local triggerInputAvailable = false
+if VirtualInputManager then
+	local okMember, member = pcall(function()
+		return VirtualInputManager.SendMouseButtonEvent
+	end)
+	triggerInputAvailable = okMember and type(member) == "function"
+end
+
+local triggerInputBlocked = false
+if not triggerInputAvailable then
+	warn(
+		"[Aimbot] триггер-бот недоступен: VirtualInputManager:SendMouseButtonEvent не читается. "
+			.. "Нужен executor. Остальные функции работают."
+	)
+end
+
+-- Тумблер триггер-бота (бинд T, переключатель)
+local triggerEnabled = false
+
+local lastTriggerTime = 0
+local pendingShot = nil -- { time = os.clock(), key = ... } - отложенный выстрел
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then
+		return
+	end
+	if input.KeyCode == BINDS.trigger then
+		triggerEnabled = not triggerEnabled
+		if not triggerEnabled then
+			pendingShot = nil -- отложенный выстрел отменяется при выключении
+		end
+	end
+end)
+
+-- Райкаст «под прицелом» - точка в центре экрана (или чуть вокруг): видим ли
+-- кто-то живой под прицелом. Отдельно от findBestTarget: там поиск цели по
+-- кругу, тут - проверка одной точки.
+local function isTargetUnderCrosshair()
+	if not (camera and character and character.Parent) then
+		return false
+	end
+
+	-- Луч из центра экрана: цель под прицелом должна быть ВИДИМА (WallCheck)
+	local viewport = camera.ViewportSize
+	local unitRay = camera:ViewportPointToRay(viewport.X / 2, viewport.Y / 2)
+	local direction = unitRay.Direction * (SETTINGS.MaxDistance > 0 and SETTINGS.MaxDistance or 1000)
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+
+	local result = Workspace:Raycast(unitRay.Origin, direction, params)
+	if not result then
+		return false
+	end
+
+	-- Упёрся в модель с Humanoid и живым Health - цель под прицелом
+	local hit = result.Instance
+	local model = hit and hit:FindFirstAncestorWhichIsA("Model")
+	if not (model and model:FindFirstChildOfClass("Humanoid")) then
+		return false
+	end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if hum.Health <= 0 then
+		return false
+	end
+	if not isEnemy(model) then
+		return false
+	end
+	return true
+end
+
+RunService.RenderStepped:Connect(function(deltaTime)
+	-- Работает ЛИБО тумблер в меню (TriggerBot), ЛИБО бинд-тумблер (triggerEnabled)
+	local activeTrigger = SETTINGS.TriggerBot or triggerEnabled
+	if not (activeTrigger and triggerInputAvailable and not triggerInputBlocked) then
+		return
+	end
+
+	-- Отложенный выстрел: время пришло - кликаем
+	if pendingShot and os.clock() >= pendingShot.time then
+		local shot = pendingShot
+		pendingShot = nil
+		-- Цель всё ещё под прицелом? Нет - выстрел отменён
+		if not isTargetUnderCrosshair() then
+			return
+		end
+		local ok = pcall(function()
+			VirtualInputManager:SendMouseButtonEvent(shot.x, shot.y, 0, true, game, 0)
+			VirtualInputManager:SendMouseButtonEvent(shot.x, shot.y, 0, false, game, 0)
+		end)
+		if not ok then
+			triggerInputBlocked = true
+			warn("[Aimbot] триггер-бот: VirtualInputManager отказал - тумблер погашен. Нужен executor.")
+		end
+		lastTriggerTime = os.clock()
+		return
+	end
+
+	-- Кулдаун между выстрелами
+	if os.clock() - lastTriggerTime < SETTINGS.TriggerCooldown then
+		return
+	end
+
+	-- Прицел на цели? Запоминаем время - выстрел через TriggerDelay
+	if isTargetUnderCrosshair() then
+		if not pendingShot then
+			pendingShot = {
+				time = os.clock() + SETTINGS.TriggerDelay,
+				x = camera.ViewportSize.X / 2,
+				y = camera.ViewportSize.Y / 2,
+			}
+		end
+	else
+		pendingShot = nil -- прицел ушёл с цели - отложенный выстрел отменяется
+	end
+end)
+
 --=========================== ЗАМЕТКИ ===========================
 
 --[[
@@ -839,6 +1020,15 @@ end)
 	8. Бинд aim может быть клавишей ИЛИ кнопкой мыши (Enum.UserInputType).
 	   Захват в меню берёт KeyCode, если он не Unknown, иначе
 	   UserInputType - мышью забиндить можно.
-	9. Компилировалось luau-compile --null (0.736), luau-analyze чистый.
+	9. ТРИГГЕР-БОТ требует executor (VirtualInputManager). Проверка «под
+	   прицелом» - райкаст из центра экрана, WallCheck сам собой. Клик
+	   отправляется SendMouseButtonEvent в центре экрана (не в точку цели:
+	   сервер видит клик по центру, как обычный ввод). Задержка 0.1 с и
+	   кулдаун 0.15 с - против выстрелов по пролетающим целям. Отложенный
+	   выстрел отменяется, если прицел ушёл с цели или триггер выключили.
+	10. TOGGLE по умолчанию (просьба пользователя): нажал бинд - включилось,
+	   нажал ещё раз - выключилось. Режим правится тумблером «Бинд аима:
+	   toggle» (false = удержание). В toggle-режиме отпускание НЕ выключает.
+	11. Компилировалось luau-compile --null (0.736), luau-analyze чистый.
 	   В БОЮ НЕ ПРОВЕРЕНО.
 ]]
