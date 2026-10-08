@@ -25,6 +25,11 @@
 	    экрана (WallCheck сам собой), тумблер в меню + бинд T (переключатель),
 	    задержка перед выстрелом и кулдаун между выстрелами правятся.
 	    Нужен executor (VirtualInputManager), без него тумблер не включается;
+	  - ESP (перенесено из AdminMenu, do-блок ESP в 20_world): подсветка
+	    сквозь стены (Highlight), метка имя/здоровье/дистанция (BillboardGui),
+	    трейсеры снизу экрана в тело и стрелки 360 по краю для целей вне
+	    кадра. Цели те же, что у аима - игроки И NPC. Цвет: враг красный,
+	    союзник зелёный (штатный Player.Team), NPC жёлтый;
 	  - БИНДЫ В TOGGLE (просьба пользователя: «переведи все кнопки в toggle»):
 	    нажал - включилось, нажал ещё раз - выключилось. Режим бинда аима
 	    правится тумблером «Бинд аима: toggle» (false = старое удержание);
@@ -35,7 +40,9 @@
 	RightCtrl - меню.
 	В меню: Аимбот, Бинд аима: toggle, WallCheck, TeamCheck, Триггер-бот,
 	степперы FOV (0-500, шаг 10), Плавность (1-20), Дистанция (0-5000),
-	Задержка выстрела (0-1 с), Пауза между выстрелами (0.05-2 с), бинды.
+	Задержка выстрела (0-1 с), Пауза между выстрелами (0.05-2 с), тумблеры
+	ESP (подсветка/имена/здоровье/дистанция/трейсеры/стрелки 360) и степпер
+	дистанции показа, бинды.
 
 	Работает только на клиенте: аим крутит КАМЕРУ, а не выстрелы - сервер
 	видит обычный ввод мыши. Это мягче хуков на ремоуты и не ловится
@@ -69,6 +76,20 @@ local SETTINGS = {
 	MaxDistance = 2000, -- дальше этого цели не берутся, 0 = без лимита
 	TriggerDelay = 0.1, -- задержка перед выстрелом, с (0 = сразу)
 	TriggerCooldown = 0.15, -- пауза между выстрелами, с
+	-- ESP (перенесено из AdminMenu)
+	Esp = false, -- ESP целиком (подсветка/метки/трейсеры/стрелки)
+	EspHighlight = true, -- подсветка сквозь стены (Highlight)
+	EspNames = true, -- имя в метке над головой
+	EspHealth = true, -- здоровье в метке
+	EspDistance = true, -- дистанция в метке
+	EspTracers = false, -- трейсеры снизу экрана в тело
+	EspOffScreen = false, -- стрелки 360 по краю для целей вне кадра
+	EspFillTransparency = 0.65, -- заливка подсветки (0 = сплошная)
+	EspTracerThickness = 1,
+	EspOffScreenSize = 34, -- размер стрелки 360, px
+	EspOffScreenThickness = 3,
+	EspOffScreenMargin = 30, -- отступ стрелки от края экрана, px
+	EspMaxDistance = 0, -- 0 = без лимита (отдельно от лимита аима)
 }
 
 local BINDS = {
@@ -80,6 +101,12 @@ local BINDS = {
 -- Цвет круга FOV и видимость панели
 local FOV_COLOR = Color3.fromRGB(120, 200, 255)
 local FOV_TRANSPARENCY = 0.35
+
+-- Цвета ESP: враг красный, союзник зелёный, NPC жёлтый (в AdminMenu цвета
+-- брались из команд иерархии DOD - здесь аимбот универсальный, проще).
+local ESP_ENEMY_COLOR = Color3.fromRGB(255, 80, 80)
+local ESP_ALLY_COLOR = Color3.fromRGB(90, 200, 120)
+local ESP_NPC_COLOR = Color3.fromRGB(255, 200, 80)
 
 -- Цели ищутся среди игроков и NPC. NPC = модели с Humanoid+HumanoidRootPart,
 -- у которых НЕТ игрока (GetPlayerFromCharacter == nil) и которые лежат в
@@ -458,6 +485,501 @@ UserInputService.InputEnded:Connect(function(input)
 	end
 end)
 
+--=========================== ESP ===========================
+--[[
+	Перенесено из AdminMenu (20_world.luau, do-блок ESP) по просьбе
+	«добавь есп можешь из adminpanel спиздить». Отличия от оригинала:
+
+	1. Цели - игроки И NPC: обход через forEachTarget, а не Players:GetPlayers
+	   (универсальный аимбот, не только DOD).
+	2. Цвет - не по командам иерархии DOD (TEAM_COLORS/GameAssets.Teams там),
+	   а проще: враг красный, союзник зелёный (штатный Player.Team через
+	   isEnemy), NPC жёлтый.
+	3. Caretaker-логики нет (способность DOD, здесь не о чем).
+	4. Каждый кадр создаётся временное множество виденных моделей -
+	   исчезнувшие из обхода цели гасятся по нему (в AdminMenu цели
+	   обходились только по Players, запись была постоянной).
+
+	Ключи объектов создаются на МОДЕЛЬ (персонаж), а не на игрока: NPC
+	игрока не имеют, а респавн игрока = новая модель. Смерть модели
+	убирает запись из espEntries (вместе с GUI).
+]]
+
+-- Экспорт наружу для меню: форвард-локалы (приём AdminMenu), определены
+-- внутри do-блока БЕЗ local.
+local espVisualsOff, espAllOff
+
+do
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	-- Трейсеры и стрелки живут в ScreenGui. IgnoreGuiInset = true
+	-- ОБЯЗАТЕЛЬНО (не косметика): WorldToViewportPoint не учитывает
+	-- GUI-инсет, координаты совпадают только при IgnoreGuiInset.
+	-- Билборды парентятся прямо в PlayerGui: BillboardGui сам
+	-- LayerCollector, вкладывать его в ScreenGui нельзя.
+	local tracerGui = Instance.new("ScreenGui")
+	tracerGui.Name = "AimbotESP"
+	tracerGui.ResetOnSpawn = false
+	tracerGui.IgnoreGuiInset = true
+	tracerGui.DisplayOrder = 90
+	tracerGui.Parent = playerGui
+
+	-- Стрелка 360 из ДВУХ Frame'ов: готового треугольника в Roblox нет,
+	-- картинку-ассет тащить нельзя (самодостаточность скрипта).
+	-- Центр полоски считается вручную: поворот GuiObject идёт вокруг
+	-- собственной точки вращения, якорь в остриё разъезжался в крестик.
+	-- Поворот всей стрелки задаётся у КОНТЕЙНЕРА (Rotation наследуется).
+	local ARROW_LEG_ANGLE = 38 -- градусов от вертикали на каждую ногу
+
+	local function createArrow(name)
+		local size = SETTINGS.EspOffScreenSize
+
+		local container = Instance.new("Frame")
+		container.Name = name
+		container.AnchorPoint = Vector2.new(0.5, 0.5)
+		container.Size = UDim2.fromOffset(size, size)
+		container.BackgroundTransparency = 1
+		container.BorderSizePixel = 0
+		container.Visible = false
+		container.ZIndex = 2
+		container.Parent = tracerGui
+
+		local legLength = size * 0.62
+		local angle = math.rad(ARROW_LEG_ANGLE)
+		-- Остриё сдвинуто на полвысоты галочки: фигура вписана в центр
+		local tipX = size * 0.5
+		local tipY = size * 0.5 - legLength * math.cos(angle) * 0.5
+
+		local bars = {}
+
+		for index, sign in ipairs({ -1, 1 }) do
+			local dirX = -sign * math.sin(angle)
+			local dirY = math.cos(angle)
+
+			local bar = Instance.new("Frame")
+			bar.Name = "Bar" .. index
+			bar.AnchorPoint = Vector2.new(0.5, 0.5)
+			bar.Position = UDim2.fromOffset(tipX + dirX * legLength * 0.5, tipY + dirY * legLength * 0.5)
+			bar.Size = UDim2.fromOffset(SETTINGS.EspOffScreenThickness, legLength)
+			bar.BorderSizePixel = 0
+			bar.Rotation = sign * ARROW_LEG_ANGLE
+			bar.Parent = container
+			bars[index] = bar
+		end
+
+		return container, bars
+	end
+
+	-- Подпись к стрелке - отдельный объект, НЕ ребёнок стрелки: Rotation
+	-- наследуется по иерархии, текст крутился бы вместе с остриём.
+	local function createArrowLabel(name)
+		local label = Instance.new("TextLabel")
+		label.Name = name
+		label.AnchorPoint = Vector2.new(0.5, 0.5)
+		label.Size = UDim2.fromOffset(140, 16)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 12
+		label.TextStrokeTransparency = 0.2
+		label.TextStrokeColor3 = Color3.new(0, 0, 0)
+		label.TextColor3 = ESP_NPC_COLOR
+		label.Text = ""
+		label.Visible = false
+		label.ZIndex = 2
+		label.Parent = tracerGui
+		return label
+	end
+
+	-- [модель] = { billboard, label, tracer, arrow, arrowBars, arrowLabel, highlight }
+	local espEntries = {}
+
+	local function hideEntry(entry)
+		if entry.highlight then
+			entry.highlight.Enabled = false
+		end
+		entry.billboard.Enabled = false
+		entry.tracer.Visible = false
+		entry.arrow.Visible = false
+		entry.arrowLabel.Visible = false
+	end
+
+	local function removeEntry(char)
+		local entry = espEntries[char]
+		if not entry then
+			return
+		end
+		if entry.highlight then
+			entry.highlight:Destroy()
+		end
+		entry.billboard:Destroy()
+		entry.tracer:Destroy()
+		entry.arrow:Destroy() -- полоски уходят вместе с контейнером
+		entry.arrowLabel:Destroy()
+		espEntries[char] = nil
+	end
+
+	local function createEntry(char)
+		local displayName = char.Name
+
+		local billboard = Instance.new("BillboardGui")
+		billboard.Name = "ESP_" .. displayName
+		billboard.ResetOnSpawn = false
+		billboard.Size = UDim2.fromOffset(220, 46)
+		billboard.StudsOffset = Vector3.new(0, 2.6, 0)
+		billboard.AlwaysOnTop = true
+		billboard.LightInfluence = 0
+		billboard.Enabled = false
+		billboard.Adornee = char:FindFirstChild("Head")
+			or char:FindFirstChild("HumanoidRootPart")
+		billboard.Parent = playerGui
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.fromScale(1, 1)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 13
+		label.TextColor3 = ESP_NPC_COLOR -- перекрасится в первом кадре
+		label.TextStrokeTransparency = 0.2
+		label.TextStrokeColor3 = Color3.new(0, 0, 0)
+		label.TextWrapped = false
+		label.Text = ""
+		label.Parent = billboard
+
+		local tracer = Instance.new("Frame")
+		tracer.Name = "Tracer_" .. displayName
+		tracer.AnchorPoint = Vector2.new(0.5, 0.5)
+		tracer.BorderSizePixel = 0
+		tracer.BackgroundColor3 = ESP_NPC_COLOR
+		tracer.Size = UDim2.fromOffset(SETTINGS.EspTracerThickness, 0)
+		tracer.Visible = false
+		tracer.ZIndex = 0
+		tracer.Parent = tracerGui
+
+		local arrow, arrowBars = createArrow("Arrow_" .. displayName)
+		local arrowLabel = createArrowLabel("ArrowText_" .. displayName)
+
+		local highlight = Instance.new("Highlight")
+		highlight.Name = "AimbotESPHighlight"
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.FillTransparency = SETTINGS.EspFillTransparency
+		highlight.OutlineTransparency = 0
+		highlight.Adornee = char
+		highlight.Enabled = false
+		highlight.Parent = char
+
+		local entry = {
+			billboard = billboard,
+			label = label,
+			tracer = tracer,
+			arrow = arrow,
+			arrowBars = arrowBars,
+			arrowLabel = arrowLabel,
+			highlight = highlight,
+		}
+		espEntries[char] = entry
+		return entry
+	end
+
+	-- Модель исчезла/умерла - убрать метку. AncestryChanged ловит и удаление
+	-- из workspace, и смерть (у погибших персонаж часто просто Destroy).
+	-- Самодельная слабая ссылка: держим модель в ключе таблицы - сборщик
+	-- не тронет, пока запись жива, поэтому подписка на модель надёжна.
+	local function watchRemoval(char)
+		local conn
+		conn = char.AncestryChanged:Connect(function()
+			if not char:IsDescendantOf(game) then
+				if conn then
+					conn:Disconnect()
+				end
+				removeEntry(char)
+			end
+		end)
+	end
+
+	-- Цвет: NPC жёлтый, враг красный, союзник зелёный
+	local function colorFor(char)
+		local other = Players:GetPlayerFromCharacter(char)
+		if not other then
+			return ESP_NPC_COLOR
+		end
+		if isEnemy(char) then
+			return ESP_ENEMY_COLOR
+		end
+		return ESP_ALLY_COLOR
+	end
+
+	-- Метка: имя (игрок - DisplayName, NPC - имя модели) + hp + дистанция
+	local function buildEspText(char, humanoidOther, distance)
+		local lines = {}
+
+		if SETTINGS.EspNames then
+			local other = Players:GetPlayerFromCharacter(char)
+			local name
+			if other then
+				name = other.DisplayName ~= other.Name
+						and (other.DisplayName .. " (@" .. other.Name .. ")")
+					or other.Name
+			else
+				name = char.Name
+			end
+			table.insert(lines, name)
+		end
+
+		local details = {}
+		if SETTINGS.EspHealth and humanoidOther then
+			local maxHealth = humanoidOther.MaxHealth
+			if maxHealth > 0 and maxHealth < math.huge then
+				table.insert(
+					details,
+					string.format(
+						"%d/%d hp",
+						math.floor(humanoidOther.Health + 0.5),
+						math.floor(maxHealth + 0.5)
+					)
+				)
+			else
+				table.insert(details, string.format("%d hp", math.floor(humanoidOther.Health + 0.5)))
+			end
+		end
+		if SETTINGS.EspDistance then
+			table.insert(details, string.format("%dm", math.floor(distance + 0.5)))
+		end
+		if #details > 0 then
+			table.insert(lines, table.concat(details, "  "))
+		end
+
+		return table.concat(lines, "\n")
+	end
+
+	-- Трейсер: из низа экрана в проекцию ОПОРНОЙ ТОЧКИ (середина корпуса,
+	-- не HRP - у кастомных моделей HRP в ступнях, линия приходила в ноги).
+	local function updateTracer(entry, cameraNow, screenPoint, onScreen, color)
+		if not SETTINGS.EspTracers or not (screenPoint and onScreen) then
+			entry.tracer.Visible = false
+			return
+		end
+
+		local viewport = cameraNow.ViewportSize
+		local originX, originY = viewport.X * 0.5, viewport.Y
+		local dx, dy = screenPoint.X - originX, screenPoint.Y - originY
+		local length = math.sqrt(dx * dx + dy * dy)
+
+		entry.tracer.Size = UDim2.fromOffset(SETTINGS.EspTracerThickness, length)
+		entry.tracer.Position = UDim2.fromOffset(originX + dx * 0.5, originY + dy * 0.5)
+		-- нулевой поворот направлен вниз по экрану, отсюда atan2(-dx, dy)
+		entry.tracer.Rotation = math.deg(math.atan2(-dx, dy))
+		entry.tracer.BackgroundColor3 = color
+		entry.tracer.Visible = true
+	end
+
+	--[[
+		Стрелка 360 для цели вне кадра. НАПРАВЛЕНИЕ СЧИТАЕТСЯ НЕ ПО
+		WorldToViewportPoint: для точки ЗА камерой проекция зеркалится
+		(цель сзади-справа дала бы стрелку влево - поворачиваться туда
+		дольше). Берётся направление в системе камеры:
+		    x = dir · RightVector, y = -dir · UpVector
+		Без деления на глубину - без переворота за спиной.
+		Строго за спиной x=y=0 - стрелка вниз («цель позади»).
+		Точка на рамке: из центра по (x, y) до ПЕРВОЙ из двух границ
+		(минимальный коэффициент), иначе стрелка вылезает за угол.
+	]]
+	local function updateOffScreen(entry, cameraNow, worldPosition, color, onScreen, char, distance)
+		if not SETTINGS.EspOffScreen or onScreen then
+			entry.arrow.Visible = false
+			entry.arrowLabel.Visible = false
+			return
+		end
+
+		local cameraFrame = cameraNow.CFrame
+		local toTarget = worldPosition - cameraFrame.Position
+		if toTarget.Magnitude <= 0 then
+			entry.arrow.Visible = false
+			entry.arrowLabel.Visible = false
+			return
+		end
+
+		local direction = toTarget.Unit
+		local ux = direction:Dot(cameraFrame.RightVector)
+		local uy = -direction:Dot(cameraFrame.UpVector) -- экранная Y растёт вниз
+
+		local length = math.sqrt(ux * ux + uy * uy)
+		if length < 1e-4 then
+			ux, uy, length = 0, 1, 1 -- строго за спиной: вниз
+		else
+			ux, uy = ux / length, uy / length
+		end
+
+		local viewport = cameraNow.ViewportSize
+		local centerX, centerY = viewport.X * 0.5, viewport.Y * 0.5
+		local limitX = math.max(centerX - SETTINGS.EspOffScreenMargin, 1)
+		local limitY = math.max(centerY - SETTINGS.EspOffScreenMargin, 1)
+
+		local scaleX = math.abs(ux) > 1e-4 and (limitX / math.abs(ux)) or math.huge
+		local scaleY = math.abs(uy) > 1e-4 and (limitY / math.abs(uy)) or math.huge
+		local scale = math.min(scaleX, scaleY)
+
+		local posX = centerX + ux * scale
+		local posY = centerY + uy * scale
+
+		entry.arrow.Position = UDim2.fromOffset(posX, posY)
+		-- при Rotation = 0 остриё смотрит вверх, отсюда atan2(ux, -uy)
+		entry.arrow.Rotation = math.deg(math.atan2(ux, -uy))
+		for _, bar in ipairs(entry.arrowBars) do
+			bar.BackgroundColor3 = color
+		end
+		entry.arrow.Visible = true
+
+		-- Подпись НЕ ребёнок стрелки (Rotation наследуется); сдвигается
+		-- к центру экрана, чтобы не уезжать за край вместе со стрелкой
+		local labelText = ""
+		if SETTINGS.EspNames then
+			local name = char.Name
+			if #name > 12 then
+				name = string.sub(name, 1, 12) .. "…"
+			end
+			labelText = name
+		end
+		if SETTINGS.EspDistance then
+			local distanceText = string.format("%dm", math.floor(distance + 0.5))
+			labelText = labelText == "" and distanceText or (labelText .. " " .. distanceText)
+		end
+
+		if labelText == "" then
+			entry.arrowLabel.Visible = false
+			return
+		end
+
+		local labelOffset = SETTINGS.EspOffScreenSize * 0.9
+		entry.arrowLabel.Position = UDim2.fromOffset(posX - ux * labelOffset, posY - uy * labelOffset)
+		entry.arrowLabel.Text = labelText
+		entry.arrowLabel.TextColor3 = color
+		entry.arrowLabel.Visible = true
+	end
+
+	-- Быстрое гашение для тумблеров настроек (иначе объект исчезал бы
+	-- только на следующем кадре обхода - выглядит как залипшая кнопка)
+	local function hideEspVisuals(key)
+		for _, entry in pairs(espEntries) do
+			if key == "EspTracers" and not SETTINGS.EspTracers then
+				entry.tracer.Visible = false
+			end
+			if key == "EspOffScreen" and not SETTINGS.EspOffScreen then
+				entry.arrow.Visible = false
+				entry.arrowLabel.Visible = false
+			end
+			if key == "EspHighlight" and not SETTINGS.EspHighlight and entry.highlight then
+				entry.highlight.Enabled = false
+			end
+		end
+	end
+
+	-- Обход целей каждый кадр. seenModels - временное множество виденных
+	-- моделей: цель, выпавшая из forEachTarget (умерла/исчезла), гасится.
+	local function updateEsp()
+		if not SETTINGS.Esp then
+			return
+		end
+		if not camera then
+			return
+		end
+		local cameraPosition = camera.CFrame.Position
+		local seenModels = {}
+
+		forEachTarget(function(char)
+			if char == character then
+				return
+			end
+			local entry = espEntries[char]
+			if not entry then
+				entry = createEntry(char)
+				watchRemoval(char)
+			end
+			seenModels[char] = true
+
+			local otherRoot = char:FindFirstChild("HumanoidRootPart")
+			local otherHumanoid = char:FindFirstChildOfClass("Humanoid")
+
+			local aimPoint = aimPointOf(char, otherRoot)
+			if not aimPoint then
+				hideEntry(entry)
+				return
+			end
+
+			local distance = (aimPoint - cameraPosition).Magnitude
+			if SETTINGS.EspMaxDistance > 0 and distance > SETTINGS.EspMaxDistance then
+				hideEntry(entry)
+				return
+			end
+
+			local color = colorFor(char)
+
+			if entry.highlight then
+				entry.highlight.Enabled = SETTINGS.EspHighlight
+				entry.highlight.FillColor = color
+				entry.highlight.OutlineColor = color
+				entry.highlight.FillTransparency = SETTINGS.EspFillTransparency
+			end
+
+			local text = buildEspText(char, otherHumanoid, distance)
+			if text ~= "" then
+				entry.label.Text = text
+				entry.label.TextColor3 = color
+				entry.billboard.Enabled = true
+			else
+				entry.billboard.Enabled = false
+			end
+
+			-- Проекция считается ОДИН раз: нужна и трейсеру, и стрелке.
+			local screenPoint, onScreen = nil, false
+			if SETTINGS.EspTracers or SETTINGS.EspOffScreen then
+				local ok, point, vis = pcall(function()
+					local vpp = camera:WorldToViewportPoint(aimPoint)
+					return vpp, vpp.Z > 0
+				end)
+				if ok then
+					screenPoint, onScreen = point, vis
+				end
+			end
+
+			updateTracer(entry, camera, screenPoint, onScreen, color)
+			updateOffScreen(entry, camera, aimPoint, color, onScreen, char, distance)
+		end)
+
+		-- Не попавшие в обход - гасим (сам forEachTarget мёртвых не отдаёт,
+		-- но модель могла выпасть из NPC_MAX_SCAN и из пределов списка)
+		for char, entry in pairs(espEntries) do
+			if not seenModels[char] then
+				hideEntry(entry)
+			end
+		end
+	end
+
+	RunService.RenderStepped:Connect(function()
+		if not SETTINGS.Esp then
+			-- Полное выключение гасит всё разом, а не ждёт кадра обхода
+			for _, entry in pairs(espEntries) do
+				hideEntry(entry)
+			end
+			return
+		end
+		updateEsp()
+	end)
+
+	-- Полное выключение ESP тумблером Esp: убирает и GUI умерших целей
+	-- (запись остаётся, вернётся с моделью). Отдельно от RenderStepped,
+	-- чтобы гасить НАЖАТИЕМ, а не в кадре.
+	-- Обе функции БЕЗ local: имена объявлены форвард-локалами перед do.
+	function espVisualsOff(key)
+		hideEspVisuals(key)
+	end
+
+	function espAllOff()
+		for _, entry in pairs(espEntries) do
+			hideEntry(entry)
+		end
+	end
+end
+
 --=========================== МЕНЮ ============================
 
 local COLORS = {
@@ -599,6 +1121,14 @@ end
 local function setSetting(id, value)
 	SETTINGS[id] = value
 	refreshToggle(id)
+	-- Точечное гашение ESP-визуалов: выключенный тумблер убирает свои
+	-- объекты сразу, а не на следующем кадре обхода (приём AdminMenu,
+	-- hideEspVisuals). espVisualsOff - форвард-локал из do-блока ESP.
+	if espVisualsOff and (id == "EspTracers" or id == "EspOffScreen" or id == "EspHighlight") then
+		espVisualsOff(id)
+	elseif id == "Esp" and not value then
+		espAllOff()
+	end
 end
 
 local function makeToggle(label, id)
@@ -785,6 +1315,15 @@ makeStepper("Плавность", "Smoothness", 1, SETTINGS.SmoothMin, SETTINGS.
 makeStepper("Дистанция", "MaxDistance", 250, 0, 5000, "m")
 makeStepper("Задержка выстрела", "TriggerDelay", 0.05, 0, 1, "с")
 makeStepper("Пауза между выстрелами", "TriggerCooldown", 0.05, 0.05, 2, "с")
+-- ESP (перенесено из AdminMenu)
+makeToggle("ESP", "Esp")
+makeToggle("ESP: подсветка", "EspHighlight")
+makeToggle("ESP: имена", "EspNames")
+makeToggle("ESP: здоровье", "EspHealth")
+makeToggle("ESP: дистанция", "EspDistance")
+makeToggle("ESP: трейсеры", "EspTracers")
+makeToggle("ESP: стрелки 360", "EspOffScreen")
+makeStepper("ESP: дистанция показа", "EspMaxDistance", 250, 0, 5000, "m")
 makeBindRow("Аим (toggle)", "aim")
 makeBindRow("Триггер-бот (toggle)", "trigger")
 makeBindRow("Меню", "menu")
@@ -1029,6 +1568,17 @@ end)
 	10. TOGGLE по умолчанию (просьба пользователя): нажал бинд - включилось,
 	   нажал ещё раз - выключилось. Режим правится тумблером «Бинд аима:
 	   toggle» (false = удержание). В toggle-режиме отпускание НЕ выключает.
-	11. Компилировалось luau-compile --null (0.736), luau-analyze чистый.
+	11. ESP (из AdminMenu): записи живут на МОДЕЛЬ персонажа, не на игрока -
+	   NPC игрока не имеют. Смерть/удаление модели ловится AncestryChanged,
+	   GUI уничтожается. Тумблеры EspHighlight/EspTracers/EspOffScreen гасят
+	   свои объекты сразу (hideEspVisuals), тумблер Esp - всё разом.
+	   Трейсер и стрелка 360 считают проекцию ОДИН раз на цель за кадр.
+	   IgnoreGuiInset = true у ScreenGui обязателен: WorldToViewportPoint
+	   не учитывает GUI-инсет, без него трейсеры съезжают на высоту инсета.
+	   Цвет: враг красный, союзник зелёный (Player.Team), NPC жёлтый.
+	   Подсветка Highlight ограничена 31 одновременным объектом (лимит
+	   движка Roblox) - при большом числе целей лишние не отрисуются,
+	   это ограничение движка, не скрипта.
+	12. Компилировалось luau-compile --null (0.736), luau-analyze чистый.
 	   В БОЮ НЕ ПРОВЕРЕНО.
 ]]
