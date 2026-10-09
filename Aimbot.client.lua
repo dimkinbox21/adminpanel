@@ -249,26 +249,40 @@ local function forEachTarget(callback)
 		end
 	end
 
-	-- NPC: прямой обход детей workspace (не GetDescendants - модели могут
-	-- лежать глубоко, но обходить тысячи объектов каждый кадр нельзя).
-	-- Модель NPC = child workspace с FindFirstChildOfClass("Humanoid").
+	-- NPC: обход children workspace, а в моделях-ПАПКАХ - спуск вглубь.
+	-- Прямые дети workspace не покрывали плейсы, где NPC лежат в папках
+	-- (баг-репорт: «авто айм на нпс не работает но на игроков работает
+	-- а триггер бот и там и там работает» - райкаст триггера достаёт
+	-- модель через FindFirstAncestorWhichIsA на любой глубине, обход -
+	-- нет). Обход остаётся ограниченным: очередь с NPC_MAX_SCAN.
+	-- Модель NPC = объект с Humanoid+HRP без игрока (GetPlayerFromCharacter).
+	local queue = { Workspace:GetChildren() }
+	local head = 1
 	local scanned = 0
-	for _, obj in ipairs(Workspace:GetChildren()) do
-		if scanned >= NPC_MAX_SCAN then
-			break
-		end
+	while head <= #queue and scanned < NPC_MAX_SCAN do
+		local obj = queue[head]
+		head += 1
 		scanned += 1
-		if obj:IsA("Model") and obj ~= character then
-			-- Цели-игроки уже обходились выше; их персонажи лежат в
-			-- workspace корнем - пропускаем тех, у кого есть игрок
-			if Players:GetPlayerFromCharacter(obj) == nil then
+		if obj:IsA("Model") then
+			if obj ~= character and Players:GetPlayerFromCharacter(obj) == nil then
 				local root = obj:FindFirstChild("HumanoidRootPart")
 				if root and isAlive(obj) then
 					callback(obj)
+					-- Внутрь модели не спускаемся: её дети - части и
+					-- аксессуары самой цели, вложенных NPC там обычно нет.
 				end
+			end
+		else
+			-- Папка (Folder) или другая не-модель: её дети в очередь -
+			-- там могут лежать NPC. Дешевле обхода тысяч объектов
+			-- (GetDescendants) не будет, но лимит сканирования держит.
+			for _, child in ipairs(obj:GetChildren()) do
+				queue[#queue + 1] = child
 			end
 		end
 	end
+	-- Непросканированный хвост очереди (лимит) теряется - это цена
+	-- NPC_MAX_SCAN, предохранителя от сотен NPC за кадр.
 end
 
 --=========================== ВЫБОР ЦЕЛИ ============================
@@ -1014,7 +1028,7 @@ local menuGui = new("ScreenGui", {
 
 local main = new("Frame", {
 	Name = "Main",
-	Size = UDim2.fromOffset(300, 240),
+	Size = UDim2.fromOffset(340, 400), -- больше: 9 ESP-строк не лезли в 240
 	Position = UDim2.new(0.5, 0, 0.5, 0),
 	AnchorPoint = Vector2.new(0.5, 0.5),
 	BackgroundColor3 = COLORS.Background,
@@ -1547,10 +1561,10 @@ end)
 	4. WallCheck лучит от КАМЕРЫ, а не от тела: то, что видит игрок.
 	   Упёрся в 2 студах от цели - считается видимым (запас на края
 	   хитбоксов и тонкие объекты).
-	5. NPC берутся только из ПРЯМЫХ детей workspace: модели, лежащие
-	   глубже (в папках), не находятся. NPC_MAX_SCAN = 300 - предохранитель.
-	   Если в плейсе NPC лежат в папках - расширять обход на
-	   Workspace:GetDescendants() с лимитом, но это дороже каждый кадр.
+	5. NPC берутся обходом children workspace с СПУСКОМ в папки (очередь):
+	   модели, лежащие глубоко в папках, находятся. NPC_MAX_SCAN = 300 -
+	   предохранитель: непросканированный хвост очереди теряется. Внутрь
+	   модели-цели обход не спускается (вложенных NPC там обычно нет).
 	6. TeamCheck работает только в играх со ШТАТНЫМИ Team (Player.Team).
 	   В плейсах без Team все считаются врагами - аим берёт всех.
 	7. Круг FOV - экранный (px), не угловой: при изменении FOV камеры
