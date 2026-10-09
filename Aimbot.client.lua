@@ -1077,7 +1077,9 @@ end)
 
 local content = new("ScrollingFrame", {
 	Name = "Content",
-	Size = UDim2.new(1, -16, 1, -44),
+	-- правый отступ 12 (полоса 4px + запас): при -16 и ширине ряда 1,0
+	-- кнопки у правого края уходили под полосу прокрутки
+	Size = UDim2.new(1, -20, 1, -44),
 	Position = UDim2.new(0, 8, 0, 38),
 	BackgroundTransparency = 1,
 	BorderSizePixel = 0,
@@ -1221,8 +1223,11 @@ local function makeStepper(label, id, step, minValue, maxValue, suffix)
 
 	local plus = new("TextButton", {
 		Size = UDim2.fromOffset(30, 22),
+		-- AnchorPoint (1, 0.5): раньше стоял (0, 0.5) - кнопка НАЧИНАЛАСЬ
+		-- на правом краю ряда и уходила наружу на 30px, ScrollingFrame
+		-- её обрезал («плюсик не влезает в меню» - баг-репорт).
 		Position = UDim2.new(1, 0, 0.5, 0),
-		AnchorPoint = Vector2.new(0, 0.5),
+		AnchorPoint = Vector2.new(1, 0.5),
 		BackgroundColor3 = COLORS.ElementBackground,
 		BorderSizePixel = 0,
 		Font = Enum.Font.Gotham,
